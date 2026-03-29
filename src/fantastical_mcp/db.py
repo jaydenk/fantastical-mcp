@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import plistlib
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -36,6 +40,14 @@ _DB_GLOB = os.path.expanduser(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def nsdate_to_datetime(nsdate: float) -> datetime:
+    """Convert an NSDate timestamp to a Python UTC datetime.
+
+    NSDate stores time as seconds since 2001-01-01 00:00:00 UTC.
+    """
+    return datetime.fromtimestamp(nsdate + NSDATE_OFFSET, tz=timezone.utc)
 
 
 def find_database_path() -> str:
@@ -173,6 +185,154 @@ class FantasticalDB:
             return False
         return name in self._exclude
 
+    # -- event decoding -----------------------------------------------------
+
+    def decode_event(self, blob: bytes, rowid: int) -> dict | None:
+        """Decode an NSKeyedArchiver event blob into a plain dict.
+
+        Returns ``None`` if the blob cannot be parsed.
+        """
+        try:
+            plist = plistlib.loads(blob)
+            objects = plist.get("$objects", [])
+            if len(objects) < 2:
+                return None
+            root = objects[1]
+            if not isinstance(root, dict):
+                return None
+
+            title = resolve_uid(objects, root.get("title"))
+            location = resolve_uid(objects, root.get("location"))
+            notes = resolve_uid(objects, root.get("notes"))
+            cal_id = resolve_uid(objects, root.get("calendarIdentifier"))
+
+            # Dates are stored as nested dicts with an NS.time key.
+            start_obj = resolve_uid(objects, root.get("startDate"))
+            end_obj = resolve_uid(objects, root.get("endDate"))
+            start_dt = (
+                nsdate_to_datetime(start_obj["NS.time"])
+                if isinstance(start_obj, dict) and "NS.time" in start_obj
+                else None
+            )
+            end_dt = (
+                nsdate_to_datetime(end_obj["NS.time"])
+                if isinstance(end_obj, dict) and "NS.time" in end_obj
+                else None
+            )
+
+            is_all_day = bool(root.get("isAllDay", False))
+
+            # Attendees: an NS.objects array of UIDs pointing to attendee dicts.
+            attendees_list: list[dict[str, str | None]] = []
+            attendees_ref = resolve_uid(objects, root.get("attendees"))
+            if isinstance(attendees_ref, dict) and "NS.objects" in attendees_ref:
+                for uid in attendees_ref["NS.objects"]:
+                    att = resolve_uid(objects, uid)
+                    if isinstance(att, dict):
+                        attendees_list.append(
+                            {
+                                "displayName": resolve_uid(
+                                    objects, att.get("displayName")
+                                ),
+                                "emailAddress": resolve_uid(
+                                    objects, att.get("emailAddress")
+                                ),
+                            }
+                        )
+
+            # Organizer
+            organizer_ref = resolve_uid(objects, root.get("organizer"))
+            organizer_dict: dict[str, str | None] | None = None
+            if isinstance(organizer_ref, dict):
+                organizer_dict = {
+                    "displayName": resolve_uid(
+                        objects, organizer_ref.get("displayName")
+                    ),
+                    "emailAddress": resolve_uid(
+                        objects, organizer_ref.get("emailAddress")
+                    ),
+                }
+
+            # Recurrence: just whether one is present.
+            recurrence_ref = resolve_uid(objects, root.get("recurrenceRule"))
+            recurring = recurrence_ref is not None and isinstance(
+                recurrence_ref, dict
+            )
+
+            conference_type = root.get("conferenceType", 0)
+            if not isinstance(conference_type, int):
+                conference_type = 0
+
+            cal_id_str = cal_id if isinstance(cal_id, str) else ""
+
+            return {
+                "rowid": rowid,
+                "title": title if isinstance(title, str) else "",
+                "location": location if isinstance(location, str) else "",
+                "notes": notes if isinstance(notes, str) else "",
+                "start": start_dt,
+                "end": end_dt,
+                "calendar_id": cal_id_str,
+                "calendar": self._cal_registry.get(cal_id_str, ""),
+                "is_all_day": is_all_day,
+                "recurring": recurring,
+                "attendees": attendees_list,
+                "organizer": organizer_dict,
+                "conference_type": conference_type,
+            }
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to decode event blob for rowid %d", rowid)
+            return None
+
+    def _decode_with_fts_fallback(
+        self, rowid: int, blob: bytes
+    ) -> dict | None:
+        """Try ``decode_event`` first; fall back to FTS + secondary index data."""
+        event = self.decode_event(blob, rowid)
+        if event is not None:
+            return event
+
+        # Fallback: combine FTS text fields with secondary index metadata.
+        try:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT title, location, notes FROM fts_fts WHERE rowid = ?",
+                (rowid,),
+            )
+            fts_row = cur.fetchone()
+            cur.execute(
+                "SELECT calendarIdentifier, startDate, recurrenceEndDate, "
+                "isAllDayOrFloating, recurring, hidden "
+                "FROM secondaryIndex_index_calendarItems WHERE rowid = ?",
+                (rowid,),
+            )
+            si_row = cur.fetchone()
+            if fts_row is None or si_row is None:
+                return None
+
+            cal_id = si_row["calendarIdentifier"] or ""
+            start_ns = si_row["startDate"]
+            end_ns = si_row["recurrenceEndDate"]
+
+            return {
+                "rowid": rowid,
+                "title": fts_row["title"] or "",
+                "location": fts_row["location"] or "",
+                "notes": fts_row["notes"] or "",
+                "start": nsdate_to_datetime(start_ns) if start_ns else None,
+                "end": nsdate_to_datetime(end_ns) if end_ns else None,
+                "calendar_id": cal_id,
+                "calendar": self._cal_registry.get(cal_id, ""),
+                "is_all_day": bool(si_row["isAllDayOrFloating"]),
+                "recurring": bool(si_row["recurring"]),
+                "attendees": [],
+                "organizer": None,
+                "conference_type": 0,
+            }
+        except Exception:  # noqa: BLE001
+            logger.warning("FTS fallback failed for rowid %d", rowid)
+            return None
+
     # -- public API ---------------------------------------------------------
 
     def calendar_name(self, cal_id: str) -> str | None:
@@ -219,6 +379,39 @@ class FantasticalDB:
                 }
             )
         return result
+
+    def get_events_in_range(
+        self, start: datetime, end: datetime
+    ) -> list[dict]:
+        """Return decoded events whose start date falls within *[start, end)*.
+
+        Events from excluded calendars and hidden events are omitted.
+        Results are ordered by start date ascending.
+        """
+        ns_start = start.timestamp() - NSDATE_OFFSET
+        ns_end = end.timestamp() - NSDATE_OFFSET
+
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE si.startDate >= ? AND si.startDate < ? "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            "ORDER BY si.startDate ASC",
+            (ns_start, ns_end),
+        )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            cal_id: str = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""

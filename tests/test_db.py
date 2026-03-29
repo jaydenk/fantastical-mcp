@@ -3,13 +3,16 @@
 import os
 import plistlib
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from fantastical_mcp.db import (
     DEFAULT_EXCLUDE_CALENDARS,
+    NSDATE_OFFSET,
     FantasticalDB,
     find_database_path,
+    nsdate_to_datetime,
     resolve_uid,
 )
 
@@ -295,5 +298,423 @@ class TestExcludeCalendarsEnvVar:
             # Explicit param wins over env var
             assert "Work" not in names
             assert "Personal" in names
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Event blob helpers
+# ---------------------------------------------------------------------------
+
+
+def _datetime_to_nsdate(dt: datetime) -> float:
+    """Convert a Python datetime to an NSDate timestamp (seconds since 2001-01-01)."""
+    return dt.timestamp() - NSDATE_OFFSET
+
+
+def _create_event_blob(
+    title: str = "Untitled",
+    location: str = "",
+    notes: str = "",
+    calendar_id: str = "abc123",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    is_all_day: bool = False,
+    attendees: list[dict[str, str]] | None = None,
+    organizer: dict[str, str] | None = None,
+    has_recurrence: bool = False,
+    conference_type: int = 0,
+    availability: int = 0,
+) -> bytes:
+    """Build a minimal FBEvent NSKeyedArchiver binary plist.
+
+    The $objects array layout:
+        [0]  "$null"
+        [1]  root dict (FBEvent fields with UID refs)
+        [2]  title string
+        [3]  location string
+        [4]  notes string
+        [5]  calendarIdentifier string
+        [6]  startDate dict  {NS.time: float}
+        [7]  endDate dict    {NS.time: float}
+        [8]  attendees array (NSArray wrapper) — may be empty
+        [9]  organizer dict  (or "$null" placeholder string)
+        [10] recurrenceRule  (or "$null" placeholder string)
+        [11] $class descriptor for FBEvent
+    """
+    if start is None:
+        start = datetime.now(tz=timezone.utc)
+    if end is None:
+        end = start + timedelta(hours=1)
+    if attendees is None:
+        attendees = []
+
+    objects: list = [
+        # [0] $null sentinel
+        "$null",
+    ]
+
+    # --- Build attendee sub-objects and the NS.objects array of UIDs ---
+    # We'll place attendee objects starting at index 12 onward.
+    attendee_uids: list[plistlib.UID] = []
+    attendee_objects: list[dict] = []
+    base_idx = 12  # first attendee object index
+    for i, att in enumerate(attendees):
+        idx = base_idx + i * 3  # each attendee takes 3 slots: dict, displayName, email
+        attendee_uids.append(plistlib.UID(idx))
+        attendee_objects.append(
+            {
+                "displayName": plistlib.UID(idx + 1),
+                "emailAddress": plistlib.UID(idx + 2),
+            }
+        )
+        attendee_objects.append(att.get("displayName", ""))
+        attendee_objects.append(att.get("emailAddress", ""))
+
+    # Organizer handling: if provided, it goes right after attendees
+    organizer_base = base_idx + len(attendees) * 3
+    if organizer:
+        organizer_uid = plistlib.UID(organizer_base)
+        organizer_objects = [
+            {
+                "displayName": plistlib.UID(organizer_base + 1),
+                "emailAddress": plistlib.UID(organizer_base + 2),
+            },
+            organizer.get("displayName", ""),
+            organizer.get("emailAddress", ""),
+        ]
+    else:
+        organizer_uid = plistlib.UID(0)  # points to $null
+        organizer_objects = []
+
+    # [1] root dict
+    root = {
+        "title": plistlib.UID(2),
+        "location": plistlib.UID(3),
+        "notes": plistlib.UID(4),
+        "calendarIdentifier": plistlib.UID(5),
+        "startDate": plistlib.UID(6),
+        "endDate": plistlib.UID(7),
+        "isAllDay": is_all_day,
+        "attendees": plistlib.UID(8),
+        "organizer": organizer_uid,
+        "recurrenceRule": plistlib.UID(10) if has_recurrence else plistlib.UID(0),
+        "conferenceType": conference_type,
+        "availability": availability,
+    }
+    objects.append(root)  # [1]
+
+    # [2] title
+    objects.append(title)
+    # [3] location
+    objects.append(location)
+    # [4] notes
+    objects.append(notes)
+    # [5] calendarIdentifier
+    objects.append(calendar_id)
+
+    # [6] startDate — nested dict with NS.time
+    objects.append({"NS.time": _datetime_to_nsdate(start)})
+    # [7] endDate
+    objects.append({"NS.time": _datetime_to_nsdate(end)})
+
+    # [8] attendees NS.objects array (UIDs pointing to attendee dicts)
+    objects.append({"NS.objects": attendee_uids})
+
+    # [9] organizer placeholder (or "$null" if no organizer — but we use UID(0) in root)
+    objects.append("$null")  # placeholder at index 9
+
+    # [10] recurrenceRule placeholder
+    if has_recurrence:
+        objects.append({"frequency": 1, "interval": 1})  # minimal recurrence rule
+    else:
+        objects.append("$null")  # placeholder
+
+    # [11] class descriptor
+    objects.append(
+        {
+            "$classname": "FBEvent",
+            "$classes": ["FBEvent", "FBMTLModel", "MTLModel", "NSObject"],
+        }
+    )
+
+    # [12+] attendee objects
+    objects.extend(attendee_objects)
+
+    # organizer objects
+    objects.extend(organizer_objects)
+
+    plist = {
+        "$version": 100000,
+        "$archiver": "NSKeyedArchiver",
+        "$top": {"root": plistlib.UID(1)},
+        "$objects": objects,
+    }
+    return plistlib.dumps(plist, fmt=plistlib.FMT_BINARY)
+
+
+def _insert_event(
+    conn: sqlite3.Connection,
+    rowid: int,
+    cal_id: str,
+    blob: bytes,
+    start: datetime,
+    end: datetime,
+    title: str = "",
+    location: str = "",
+    notes: str = "",
+    hidden: int | None = None,
+    is_all_day: int = 0,
+) -> None:
+    """Insert an event into database2, secondaryIndex, and fts_fts."""
+    cur = conn.cursor()
+
+    # database2 row
+    collection = f"calendarItems-{cal_id}"
+    cur.execute(
+        "INSERT INTO database2 (rowid, collection, key, data) VALUES (?, ?, ?, ?)",
+        (rowid, collection, f"event-{rowid}", blob),
+    )
+
+    # secondaryIndex row
+    ns_start = _datetime_to_nsdate(start)
+    ns_end = _datetime_to_nsdate(end)
+    cur.execute(
+        "INSERT INTO secondaryIndex_index_calendarItems "
+        "(rowid, calendarIdentifier, startDate, recurrenceEndDate, hidden, isAllDayOrFloating) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (rowid, cal_id, ns_start, ns_end, hidden, is_all_day),
+    )
+
+    # fts_fts row (uses implicit rowid)
+    cur.execute(
+        "INSERT INTO fts_fts (rowid, title, location, notes, URL, attendees, attachments) "
+        "VALUES (?, ?, ?, ?, '', '', '')",
+        (rowid, title, location, notes),
+    )
+
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# populated_db fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def populated_db(test_db):
+    """Add two concrete events to the test database.
+
+    Events:
+    - rowid 100: "Team Standup" today 09:00-10:00 UTC, Work calendar (abc123)
+    - rowid 101: "Lunch with Sara" tomorrow 14:00-15:00 UTC, Personal calendar (def456)
+    """
+    conn = sqlite3.connect(str(test_db))
+
+    now = datetime.now(tz=timezone.utc)
+    today_9 = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    today_10 = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    tomorrow_14 = (now + timedelta(days=1)).replace(
+        hour=14, minute=0, second=0, microsecond=0
+    )
+    tomorrow_15 = (now + timedelta(days=1)).replace(
+        hour=15, minute=0, second=0, microsecond=0
+    )
+
+    blob1 = _create_event_blob(
+        title="Team Standup",
+        location="Meeting Room A",
+        notes="",
+        calendar_id="abc123",
+        start=today_9,
+        end=today_10,
+    )
+    _insert_event(
+        conn,
+        rowid=100,
+        cal_id="abc123",
+        blob=blob1,
+        start=today_9,
+        end=today_10,
+        title="Team Standup",
+        location="Meeting Room A",
+    )
+
+    blob2 = _create_event_blob(
+        title="Lunch with Sara",
+        location="The Crafers Hotel",
+        notes="Book table",
+        calendar_id="def456",
+        start=tomorrow_14,
+        end=tomorrow_15,
+    )
+    _insert_event(
+        conn,
+        rowid=101,
+        cal_id="def456",
+        blob=blob2,
+        start=tomorrow_14,
+        end=tomorrow_15,
+        title="Lunch with Sara",
+        location="The Crafers Hotel",
+        notes="Book table",
+    )
+
+    conn.close()
+    return test_db
+
+
+# ---------------------------------------------------------------------------
+# NSDate conversion tests
+# ---------------------------------------------------------------------------
+
+
+class TestNSDateConversion:
+    """Tests for nsdate_to_datetime helper."""
+
+    def test_known_date_converts_correctly(self):
+        """2001-01-01 00:00:00 UTC is NSDate epoch (0.0)."""
+        result = nsdate_to_datetime(0.0)
+        expected = datetime(2001, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        assert result == expected
+
+    def test_roundtrip(self):
+        """Converting to NSDate and back should yield the original datetime."""
+        original = datetime(2025, 6, 15, 12, 30, 0, tzinfo=timezone.utc)
+        ns_val = _datetime_to_nsdate(original)
+        result = nsdate_to_datetime(ns_val)
+        assert abs((result - original).total_seconds()) < 1
+
+
+# ---------------------------------------------------------------------------
+# Event decoding tests
+# ---------------------------------------------------------------------------
+
+
+class TestEventDecoding:
+    """Tests for FantasticalDB.decode_event and get_events_in_range."""
+
+    def test_decode_event_blob(self, populated_db):
+        """Both inserted events should be decodable."""
+        db = FantasticalDB(str(populated_db))
+        try:
+            conn = sqlite3.connect(str(populated_db))
+            cur = conn.cursor()
+            cur.execute("SELECT rowid, data FROM database2 WHERE collection LIKE 'calendarItems-%'")
+            rows = cur.fetchall()
+            conn.close()
+
+            decoded = []
+            for row in rows:
+                event = db.decode_event(row[1], row[0])
+                if event is not None:
+                    decoded.append(event)
+            assert len(decoded) == 2
+        finally:
+            db.close()
+
+    def test_event_has_required_fields(self, populated_db):
+        """Decoded events must contain all expected keys."""
+        db = FantasticalDB(str(populated_db))
+        try:
+            conn = sqlite3.connect(str(populated_db))
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT rowid, data FROM database2 WHERE collection LIKE 'calendarItems-%' LIMIT 1"
+            )
+            row = cur.fetchone()
+            conn.close()
+
+            event = db.decode_event(row[1], row[0])
+            assert event is not None
+            required_keys = {
+                "rowid",
+                "title",
+                "location",
+                "notes",
+                "start",
+                "end",
+                "calendar_id",
+                "calendar",
+                "is_all_day",
+                "recurring",
+                "attendees",
+                "organizer",
+                "conference_type",
+            }
+            assert required_keys.issubset(event.keys())
+        finally:
+            db.close()
+
+    def test_get_events_filters_by_date(self, populated_db):
+        """Querying today's range should return only today's event."""
+        db = FantasticalDB(str(populated_db))
+        try:
+            now = datetime.now(tz=timezone.utc)
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            events = db.get_events_in_range(day_start, day_end)
+            assert len(events) == 1
+            assert events[0]["title"] == "Team Standup"
+        finally:
+            db.close()
+
+    def test_get_events_returns_both(self, populated_db):
+        """Querying a two-day range should return both events."""
+        db = FantasticalDB(str(populated_db))
+        try:
+            now = datetime.now(tz=timezone.utc)
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=2)
+            events = db.get_events_in_range(day_start, day_end)
+            assert len(events) == 2
+        finally:
+            db.close()
+
+    def test_excludes_hidden_calendars(self, populated_db):
+        """Events from hidden calendars (e.g. Weather) should be excluded."""
+        # Add a weather event
+        conn = sqlite3.connect(str(populated_db))
+        now = datetime.now(tz=timezone.utc)
+        today_8 = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        today_9 = now.replace(hour=9, minute=0, second=0, microsecond=0)
+
+        blob = _create_event_blob(
+            title="Sunny 25°C",
+            location="Adelaide",
+            calendar_id="CurrentWeather",
+            start=today_8,
+            end=today_9,
+        )
+        _insert_event(
+            conn,
+            rowid=200,
+            cal_id="CurrentWeather",
+            blob=blob,
+            start=today_8,
+            end=today_9,
+            title="Sunny 25°C",
+            location="Adelaide",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(populated_db))
+        try:
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            events = db.get_events_in_range(day_start, day_end)
+            titles = [e["title"] for e in events]
+            assert "Sunny 25°C" not in titles
+            # Team Standup should still be there
+            assert "Team Standup" in titles
+        finally:
+            db.close()
+
+    def test_decode_corrupt_blob_returns_none(self, test_db):
+        """Corrupt blob data should return None, not raise."""
+        db = FantasticalDB(str(test_db))
+        try:
+            result = db.decode_event(b"not a plist", 999)
+            assert result is None
         finally:
             db.close()
