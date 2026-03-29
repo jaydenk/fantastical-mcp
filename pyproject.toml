@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fantastical-mcp"
+version = "0.1.0"
+description = "Fantastical calendar MCP server — read events from Fantastical's local database, create via URL scheme"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+keywords = ["macos", "mcp", "model-context-protocol", "calendar", "fantastical"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Scheduling",
+]
+dependencies = [
+    "fastmcp>=2.0.0",
+]
+
+[project.scripts]
+fantastical-mcp = "fantastical_mcp.server:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests as integration tests (require Fantastical installed)",
+]
