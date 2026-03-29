@@ -718,3 +718,106 @@ class TestEventDecoding:
             assert result is None
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# FTS search tests
+# ---------------------------------------------------------------------------
+
+
+class TestSearchEvents:
+    def test_search_by_title(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            results = db.search_events("Standup")
+            assert len(results) == 1
+            assert results[0]["title"] == "Team Standup"
+        finally:
+            db.close()
+
+    def test_search_by_location(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            results = db.search_events("Crafers")
+            assert len(results) == 1
+            assert results[0]["title"] == "Lunch with Sara"
+        finally:
+            db.close()
+
+    def test_search_no_results(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            results = db.search_events("nonexistent")
+            assert len(results) == 0
+        finally:
+            db.close()
+
+    def test_search_respects_limit(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            # Use a broad prefix query — FTS5 does not accept bare '*'.
+            results = db.search_events("T*", limit=1)
+            assert len(results) <= 1
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Calendar filter tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetEventsByCalendar:
+    def test_filter_by_calendar_name(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            events = db.get_events_by_calendar("Work")
+            assert all(e["calendar"] == "Work" for e in events)
+            assert any(e["title"] == "Team Standup" for e in events)
+        finally:
+            db.close()
+
+    def test_filter_by_calendar_no_results(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            events = db.get_events_by_calendar("Nonexistent Calendar")
+            assert len(events) == 0
+        finally:
+            db.close()
+
+    def test_filter_with_date_range(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            events = db.get_events_by_calendar("Personal", days=30)
+            assert any(e["title"] == "Lunch with Sara" for e in events)
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Single event lookup tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetEventById:
+    def test_get_existing_event(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            events = db.get_events_in_range(
+                datetime.now(timezone.utc) - timedelta(hours=1),
+                datetime.now(timezone.utc) + timedelta(days=2),
+            )
+            assert len(events) > 0
+            event = db.get_event(events[0]["rowid"])
+            assert event is not None
+            assert event["title"] == events[0]["title"]
+        finally:
+            db.close()
+
+    def test_get_nonexistent_event(self, populated_db):
+        db = FantasticalDB(str(populated_db))
+        try:
+            event = db.get_event(99999)
+            assert event is None
+        finally:
+            db.close()
