@@ -7,7 +7,7 @@ import logging
 import os
 import plistlib
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -412,6 +412,101 @@ class FantasticalDB:
                 results.append(event)
 
         return results
+
+    def search_events(self, query: str, limit: int = 20) -> list[dict]:
+        """Full-text search across event titles, locations, and notes.
+
+        Uses the ``fts_fts`` FTS5 virtual table.  Hidden events and events
+        from excluded calendars are omitted.  Results are ordered by start
+        date descending.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier, si.startDate "
+            "FROM fts_fts f "
+            "JOIN database2 d ON d.rowid = f.rowid "
+            "JOIN secondaryIndex_index_calendarItems si ON si.rowid = f.rowid "
+            "WHERE fts_fts MATCH ? "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            "ORDER BY si.startDate DESC "
+            "LIMIT ?",
+            (query, limit),
+        )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            cal_id: str = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
+
+    def get_events_by_calendar(
+        self, calendar_name: str, days: int = 30
+    ) -> list[dict]:
+        """Return events for a named calendar within a date window.
+
+        Resolves *calendar_name* to one or more calendar identifiers via the
+        internal registry.  The date window spans from *now* to
+        *now + days* days.  Returns an empty list if the calendar name is
+        not found.
+        """
+        # Resolve name → id(s).
+        cal_ids = [
+            cid
+            for cid, name in self._cal_registry.items()
+            if name == calendar_name
+        ]
+        if not cal_ids:
+            return []
+
+        now = datetime.now(tz=timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        ns_start = today_start.timestamp() - NSDATE_OFFSET
+        ns_end = (today_start + timedelta(days=days)).timestamp() - NSDATE_OFFSET
+
+        placeholders = ",".join("?" for _ in cal_ids)
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            f"WHERE si.calendarIdentifier IN ({placeholders}) "
+            "AND si.startDate >= ? AND si.startDate < ? "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            "ORDER BY si.startDate ASC",
+            (*cal_ids, ns_start, ns_end),
+        )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
+
+    def get_event(self, rowid: int) -> dict | None:
+        """Look up a single event by its database rowid.
+
+        Returns ``None`` if no event with the given rowid exists.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE d.rowid = ?",
+            (rowid,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+
+        return self._decode_with_fts_fallback(row["rowid"], row["data"])
 
     def close(self) -> None:
         """Close the underlying SQLite connection."""
