@@ -220,7 +220,8 @@ class FantasticalDB:
                 else None
             )
 
-            is_all_day = bool(root.get("isAllDay", False))
+            is_all_day_ref = resolve_uid(objects, root.get("isAllDay"))
+            is_all_day = bool(is_all_day_ref) if isinstance(is_all_day_ref, bool) else False
 
             # Attendees: an NS.objects array of UIDs pointing to attendee dicts.
             attendees_list: list[dict[str, str | None]] = []
@@ -259,9 +260,8 @@ class FantasticalDB:
                 recurrence_ref, dict
             )
 
-            conference_type = root.get("conferenceType", 0)
-            if not isinstance(conference_type, int):
-                conference_type = 0
+            conf_ref = resolve_uid(objects, root.get("conferenceType"))
+            conference_type = conf_ref if isinstance(conf_ref, int) else 0
 
             cal_id_str = cal_id if isinstance(cal_id, str) else ""
 
