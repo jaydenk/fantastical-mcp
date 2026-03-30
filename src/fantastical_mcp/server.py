@@ -23,15 +23,15 @@ TRANSPORT = os.environ.get("FANTASTICAL_MCP_TRANSPORT", "stdio")
 HTTP_HOST = os.environ.get("FANTASTICAL_MCP_HOST", "127.0.0.1")
 HTTP_PORT = int(os.environ.get("FANTASTICAL_MCP_PORT", "8000"))
 
+MAX_DAYS = 365
+MAX_LIMIT = 200
+
 mcp = FastMCP("Fantastical")
 
-_db: FantasticalDB | None = None
+_db = FantasticalDB(find_database_path())
 
 
 def _get_db() -> FantasticalDB:
-    global _db
-    if _db is None:
-        _db = FantasticalDB(find_database_path())
     return _db
 
 
@@ -58,6 +58,7 @@ async def get_upcoming(days: int = 7) -> str:
     Args:
         days: Number of days to look ahead (default 7).
     """
+    days = min(days, MAX_DAYS)
     db = _get_db()
     now = datetime.now(timezone.utc)
     start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -100,6 +101,7 @@ async def search_events(query: str, limit: int = 20) -> str:
         query: Search term (supports FTS5 syntax: AND, OR, NOT, quotes for phrases).
         limit: Maximum number of results (default 20).
     """
+    limit = min(limit, MAX_LIMIT)
     db = _get_db()
     events = db.search_events(query, limit=limit)
     if not events:
@@ -115,6 +117,7 @@ async def get_events_by_calendar(calendar: str, days: int = 30) -> str:
         calendar: Calendar name (e.g. "Work", "Personal"). Use get_calendars to see available names.
         days: Number of days to look ahead (default 30).
     """
+    days = min(days, MAX_DAYS)
     db = _get_db()
     events = db.get_events_by_calendar(calendar, days=days)
     if not events:
@@ -142,16 +145,14 @@ async def get_availability(date: str, calendars: list[str] | None = None) -> str
     start = local_start.astimezone(timezone.utc)
     end = local_end.astimezone(timezone.utc)
 
+    all_events = db.get_events_in_range(start, end)
     if calendars:
-        events = []
-        for cal in calendars:
-            events.extend(db.get_events_by_calendar(cal, days=1))
-        events = [
-            e for e in events
-            if e.get("start") and e["start"].date() == local_start.date()
+        cal_set = {c.lower() for c in calendars}
+        all_events = [
+            e for e in all_events
+            if e.get("calendar", "").lower() in cal_set
         ]
-    else:
-        events = db.get_events_in_range(start, end)
+    events = all_events
 
     return format_availability(events, date)
 
@@ -169,6 +170,7 @@ async def get_recurring(
         calendar: Optional calendar name to filter by. Use get_calendars to see available names.
         limit: Maximum number of results (default 50).
     """
+    limit = min(limit, MAX_LIMIT)
     db = _get_db()
     events = db.get_recurring_events(calendar_name=calendar, limit=limit)
     if not events:
@@ -186,6 +188,7 @@ async def get_invitations(limit: int = 20) -> str:
     Args:
         limit: Maximum number of results (default 20).
     """
+    limit = min(limit, MAX_LIMIT)
     db = _get_db()
     events = db.get_pending_invitations(limit=limit)
     if not events:
@@ -202,6 +205,7 @@ async def get_recent(limit: int = 10) -> str:
     Args:
         limit: Maximum number of results (default 10).
     """
+    limit = min(limit, MAX_LIMIT)
     db = _get_db()
     events = db.get_recent_events(limit=limit)
     if not events:
@@ -243,6 +247,10 @@ async def show_date(date: str) -> str:
     Args:
         date: Date in YYYY-MM-DD format.
     """
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return f"Invalid date format: {date}. Use YYYY-MM-DD."
     url = show_date_url(date)
     execute_url(url, background=False)
     return f"Opened Fantastical to {date}."
