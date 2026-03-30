@@ -30,6 +30,13 @@ DEFAULT_EXCLUDE_CALENDARS: set[str] = {
     "Notifications",
 }
 
+# Calendars excluded from recurring event listings by default.
+# Birthdays and Anniversaries dominate recurring results without adding value.
+DEFAULT_RECURRING_EXCLUDE_CALENDARS: set[str] = {
+    "Birthdays",
+    "Anniversaries",
+}
+
 _DB_GLOB = os.path.expanduser(
     "~/Library/Group Containers/"
     "85C27NK92C.com.flexibits.fantastical2.mac/"
@@ -146,6 +153,15 @@ class FantasticalDB:
             else:
                 self._exclude = set(DEFAULT_EXCLUDE_CALENDARS)
 
+        # Resolve recurring-specific exclusion set.
+        recurring_env = os.environ.get("FANTASTICAL_RECURRING_EXCLUDE_CALENDARS")
+        if recurring_env:
+            self._recurring_exclude: set[str] = {
+                s.strip() for s in recurring_env.split(",") if s.strip()
+            }
+        else:
+            self._recurring_exclude = set(DEFAULT_RECURRING_EXCLUDE_CALENDARS)
+
         # Calendar registry: id → display name.
         self._cal_registry: dict[str, str] = {}
         self._load_calendars()
@@ -184,6 +200,13 @@ class FantasticalDB:
         if name is None:
             return False
         return name in self._exclude
+
+    def _is_recurring_excluded(self, cal_id: str) -> bool:
+        """Return ``True`` if the calendar should be hidden from recurring results."""
+        name = self._cal_registry.get(cal_id)
+        if name is None:
+            return False
+        return name in self._exclude or name in self._recurring_exclude
 
     # -- event decoding -----------------------------------------------------
 
@@ -566,7 +589,7 @@ class FantasticalDB:
             if len(results) >= limit:
                 break
             cal_id: str = row["calendarIdentifier"]
-            if self._is_excluded(cal_id):
+            if self._is_recurring_excluded(cal_id):
                 continue
             event = self._decode_with_fts_fallback(row["rowid"], row["data"])
             if event is not None:

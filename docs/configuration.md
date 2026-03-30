@@ -6,6 +6,7 @@
 |----------|---------|-------------|
 | `FANTASTICAL_DB_PATH` | Auto-detected | Override the auto-discovered database path. Must point to an existing `.fcdata` file. |
 | `FANTASTICAL_EXCLUDE_CALENDARS` | `Weather,Openings,RSVP Invitations,Proposals,Notifications` | Comma-separated calendar names to hide from all query results. Replaces the default exclusion list entirely when set. |
+| `FANTASTICAL_RECURRING_EXCLUDE_CALENDARS` | `Birthdays,Anniversaries` | Comma-separated calendar names to additionally exclude from `get_recurring` results. Replaces the default recurring exclusion list when set. |
 | `FANTASTICAL_MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` (default for CLI tools) or `sse` (HTTP server). |
 | `FANTASTICAL_MCP_HOST` | `127.0.0.1` | Host address for SSE transport. |
 | `FANTASTICAL_MCP_PORT` | `8000` | Port for SSE transport. |
@@ -130,6 +131,20 @@ Priority order:
 1. `exclude_calendars` constructor parameter (highest)
 2. `FANTASTICAL_EXCLUDE_CALENDARS` environment variable
 3. Built-in default set (lowest)
+
+### Recurring Event Exclusion
+
+The `get_recurring` tool additionally excludes Birthdays and Anniversaries calendars by default, since these dominate recurring results without adding scheduling value.
+
+Override with `FANTASTICAL_RECURRING_EXCLUDE_CALENDARS`:
+
+```bash
+# Include birthdays in recurring results
+FANTASTICAL_RECURRING_EXCLUDE_CALENDARS=""
+
+# Exclude different calendars
+FANTASTICAL_RECURRING_EXCLUDE_CALENDARS="Birthdays,Holidays in Australia"
+```
 
 ---
 
