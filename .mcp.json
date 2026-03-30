@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fantastical": {
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/kerrj/Documents/Development/fantastical-mcp", "fantastical-mcp"]
+    }
+  }
+}
