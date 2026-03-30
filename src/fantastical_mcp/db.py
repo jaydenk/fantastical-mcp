@@ -511,15 +511,21 @@ class FantasticalDB:
     def get_recurring_events(
         self, calendar_name: str | None = None, limit: int = 50
     ) -> list[dict]:
-        """Return upcoming recurring events.
+        """Return active recurring events.
 
-        Optionally filtered to a single calendar by name.  Only future
-        events are returned, ordered by start date ascending.
+        Recurring events store the *original* series start date, not the
+        next occurrence, so we cannot filter by ``startDate >= now``.
+        Instead we return all recurring events that have no end date or
+        whose recurrence end date is in the future.
+
+        Optionally filtered to a single calendar by name.
         """
         now = datetime.now(tz=timezone.utc)
         ns_now = now.timestamp() - NSDATE_OFFSET
 
         cur = self._conn.cursor()
+        # Over-fetch to compensate for Python-side calendar exclusion.
+        fetch_limit = limit * 3
 
         if calendar_name:
             cal_ids = [
@@ -534,27 +540,31 @@ class FantasticalDB:
                 "SELECT d.rowid, d.data, si.calendarIdentifier "
                 "FROM database2 d "
                 "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
-                f"WHERE si.recurring = 1 AND si.startDate >= ? "
+                f"WHERE si.recurring = 1 "
+                f"AND (si.recurrenceEndDate IS NULL OR si.recurrenceEndDate >= ?) "
                 f"AND si.calendarIdentifier IN ({placeholders}) "
                 "AND (si.hidden IS NULL OR si.hidden = 0) "
                 "ORDER BY si.startDate ASC "
                 "LIMIT ?",
-                (ns_now, *cal_ids, limit),
+                (ns_now, *cal_ids, fetch_limit),
             )
         else:
             cur.execute(
                 "SELECT d.rowid, d.data, si.calendarIdentifier "
                 "FROM database2 d "
                 "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
-                "WHERE si.recurring = 1 AND si.startDate >= ? "
+                "WHERE si.recurring = 1 "
+                "AND (si.recurrenceEndDate IS NULL OR si.recurrenceEndDate >= ?) "
                 "AND (si.hidden IS NULL OR si.hidden = 0) "
                 "ORDER BY si.startDate ASC "
                 "LIMIT ?",
-                (ns_now, limit),
+                (ns_now, fetch_limit),
             )
 
         results: list[dict] = []
         for row in cur.fetchall():
+            if len(results) >= limit:
+                break
             cal_id: str = row["calendarIdentifier"]
             if self._is_excluded(cal_id):
                 continue
@@ -565,25 +575,30 @@ class FantasticalDB:
         return results
 
     def get_pending_invitations(self, limit: int = 20) -> list[dict]:
-        """Return events with pending invitations, ordered by start date.
+        """Return events with pending invitations, most recent first.
 
         Uses the ``invitationNeedsAction`` flag in the secondary index.
-        Hidden events and events from excluded calendars are omitted.
+        Ordered by start date descending so the most relevant (recent/future)
+        invitations appear first.  Hidden events and events from excluded
+        calendars are omitted.
         """
         cur = self._conn.cursor()
+        fetch_limit = limit * 3
         cur.execute(
             "SELECT d.rowid, d.data, si.calendarIdentifier "
             "FROM database2 d "
             "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
             "WHERE si.invitationNeedsAction = 1 "
             "AND (si.hidden IS NULL OR si.hidden = 0) "
-            "ORDER BY si.startDate ASC "
+            "ORDER BY si.startDate DESC "
             "LIMIT ?",
-            (limit,),
+            (fetch_limit,),
         )
 
         results: list[dict] = []
         for row in cur.fetchall():
+            if len(results) >= limit:
+                break
             cal_id: str = row["calendarIdentifier"]
             if self._is_excluded(cal_id):
                 continue
@@ -598,8 +613,12 @@ class FantasticalDB:
 
         Uses ``rowid DESC`` ordering as a proxy for creation/sync time.
         Hidden events and events from excluded calendars are omitted.
+        Over-fetches to compensate for Python-side calendar exclusion.
         """
         cur = self._conn.cursor()
+        # Over-fetch significantly — many high-rowid entries may be from
+        # excluded system calendars (Weather, Holidays, etc.).
+        fetch_limit = limit * 5
         cur.execute(
             "SELECT d.rowid, d.data, si.calendarIdentifier "
             "FROM database2 d "
@@ -607,11 +626,13 @@ class FantasticalDB:
             "WHERE (si.hidden IS NULL OR si.hidden = 0) "
             "ORDER BY d.rowid DESC "
             "LIMIT ?",
-            (limit,),
+            (fetch_limit,),
         )
 
         results: list[dict] = []
         for row in cur.fetchall():
+            if len(results) >= limit:
+                break
             cal_id: str = row["calendarIdentifier"]
             if self._is_excluded(cal_id):
                 continue
