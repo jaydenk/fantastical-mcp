@@ -92,6 +92,9 @@ See [docs/configuration.md](docs/configuration.md) for environment variables, ca
 | `search_events` | Full-text search across titles, locations, notes, attendees |
 | `get_events_by_calendar` | Events from a specific calendar |
 | `get_availability` | Free/busy time slots for a date |
+| `get_recurring` | Upcoming recurring events, optionally filtered by calendar |
+| `get_invitations` | Pending event invitations that need a response |
+| `get_recent` | Most recently added or synced events |
 | `create_event` | Create an event using natural language |
 | `show_date` | Open Fantastical's mini calendar to a date |
 
