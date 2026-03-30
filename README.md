@@ -1,22 +1,22 @@
-# Fantastical MCP Server
+# Fantastical MCP
 
-An MCP (Model Context Protocol) server that gives AI assistants read/write access to your Fantastical calendar on macOS.
+An MCP server that gives AI assistants read/write access to your Fantastical calendar on macOS.
 
-## What It Does
+## What it does
 
-fantastical-mcp reads calendar events directly from Fantastical's local SQLite database and creates events via Fantastical's `x-fantastical3://` URL scheme. This approach requires no TCC permissions, no API keys, and no network access -- it works entirely offline using the data Fantastical already stores on your Mac.
+fantastical-mcp reads calendar events directly from Fantastical's local SQLite database and creates events via Fantastical's `x-fantastical3://` URL scheme. No TCC permissions, no API keys, no network access -- it works entirely offline using the data Fantastical already stores on your Mac.
 
-- **Read** — Query events by date range, calendar, or full-text search
-- **Write** — Create events using Fantastical's natural language parser
-- **Navigate** — Open Fantastical to a specific date
+- **Read** -- Query events by date range, calendar, or full-text search
+- **Write** -- Create events using Fantastical's natural language parser
+- **Navigate** -- Open Fantastical to a specific date
 
 ## Requirements
 
-- macOS (Fantastical stores its database in `~/Library/Group Containers/`)
+- macOS
 - [Fantastical](https://flexibits.com/fantastical) installed with at least one calendar
 - Python 3.12+
 
-## Installation
+## Quick start
 
 ### Published package (once on PyPI)
 
@@ -29,17 +29,16 @@ uvx fantastical-mcp
 ```bash
 git clone https://github.com/jaydenk/fantastical-mcp.git
 cd fantastical-mcp
-uv venv
-uv pip install -e ".[test]"
+uv venv && uv pip install -e ".[test]"
 ```
 
 ## Configuration
 
 ### Claude Code
 
-Add to your Claude Code MCP settings (`.claude/settings.json` or project-level):
+Add to your `.claude/settings.json` (or project-level settings):
 
-**Using published package:**
+**Published package:**
 
 ```json
 {
@@ -52,7 +51,7 @@ Add to your Claude Code MCP settings (`.claude/settings.json` or project-level):
 }
 ```
 
-**Using local development install:**
+**Local development:**
 
 ```json
 {
@@ -80,81 +79,37 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-## Available Tools
+See [docs/configuration.md](docs/configuration.md) for environment variables, calendar exclusion, and transport options.
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `get_today` | Get all events for today, grouped by calendar | — |
-| `get_upcoming` | Get events for the next N days, grouped by date | `days` (default: 7) |
-| `get_calendars` | List all calendars with event counts | — |
-| `get_event` | Get full details for a specific event | `event_id` |
-| `search_events` | Full-text search across titles, locations, notes, attendees | `query`, `limit` (default: 20) |
-| `get_events_by_calendar` | Get events from a specific calendar | `calendar`, `days` (default: 30) |
-| `get_availability` | Show free/busy time slots for a date | `date` (YYYY-MM-DD), `calendars` (optional list) |
-| `create_event` | Create an event using natural language | `sentence`, `calendar` (optional), `add_immediately` (default: false) |
-| `show_date` | Open Fantastical's mini calendar to a date | `date` (YYYY-MM-DD) |
+## Available tools
 
-## Environment Variables
+| Tool | Description |
+|------|-------------|
+| `get_today` | All events for today, grouped by calendar |
+| `get_upcoming` | Events for the next N days, grouped by date |
+| `get_calendars` | List all calendars with event counts |
+| `get_event` | Full details for a specific event by ID |
+| `search_events` | Full-text search across titles, locations, notes, attendees |
+| `get_events_by_calendar` | Events from a specific calendar |
+| `get_availability` | Free/busy time slots for a date |
+| `create_event` | Create an event using natural language |
+| `show_date` | Open Fantastical's mini calendar to a date |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `FANTASTICAL_DB_PATH` | Override auto-discovered database path | Auto-detected |
-| `FANTASTICAL_EXCLUDE_CALENDARS` | Comma-separated calendar names to hide | `Weather,Openings,RSVP Invitations,Proposals,Notifications` |
-| `FANTASTICAL_MCP_TRANSPORT` | Transport mode (`stdio` or `sse`) | `stdio` |
-| `FANTASTICAL_MCP_HOST` | Host for SSE transport | `127.0.0.1` |
-| `FANTASTICAL_MCP_PORT` | Port for SSE transport | `8000` |
-
-## How It Works
-
-Fantastical uses a [YapDatabase](https://github.com/yapstudios/YapDatabase) SQLite store. Each calendar event is serialised as an `NSKeyedArchiver` binary plist blob in the `database2` table. The server uses a three-tier read strategy:
-
-1. **Secondary index** (`secondaryIndex_index_calendarItems`) — Used for date-range filtering and calendar lookups. This table stores pre-extracted fields like `startDate`, `calendarIdentifier`, and `hidden`, enabling fast SQL queries without blob decoding.
-2. **FTS5 virtual table** (`fts_fts`) — Powers full-text search across event titles, locations, notes, and attendees.
-3. **Blob decode** — `NSKeyedArchiver` plists are decoded with Python's `plistlib` to extract full event details (attendees, organiser, recurrence, conference type). Falls back to FTS + secondary index data if a blob cannot be parsed.
-
-For writes, the server constructs `x-fantastical3://parse?` URLs and opens them via `macOS open`, which hands the natural language string to Fantastical's parser.
+See [docs/tools.md](docs/tools.md) for parameters, types, defaults, and example output.
 
 ## Limitations
 
-- **No update or delete** — Fantastical's URL scheme only supports event creation. Modification and deletion require EventKit, which needs TCC permissions.
-- **Blob format dependency** — The `NSKeyedArchiver` serialisation format is an internal implementation detail of Fantastical and could change between versions. The FTS fallback path mitigates this.
-- **macOS only** — Relies on Fantastical's macOS database location and the `open` command.
-- **Read-only database access** — The database is opened in `?mode=ro` to avoid any risk of corruption.
+- **No update or delete** -- Fantastical's URL scheme only supports event creation. Modification and deletion require EventKit, which needs TCC permissions.
+- **macOS only** -- Relies on Fantastical's macOS database location and the `open` command.
+- **Read-only database access** -- The database is opened in `?mode=ro` to prevent any risk of corruption.
+- **Blob format dependency** -- The `NSKeyedArchiver` serialisation format is an internal detail of Fantastical and could change between versions. An FTS fallback path mitigates this.
 
-## Development
+## Documentation
 
-### Project structure
-
-```
-src/fantastical_mcp/
-    __init__.py        # Package entry, exports `mcp`
-    server.py          # FastMCP server and tool definitions
-    db.py              # SQLite database access layer
-    formatters.py      # Plain-text output formatters
-    url_scheme.py      # URL scheme helpers for writes
-tests/
-    test_db.py         # Database layer unit tests
-    test_formatters.py # Formatter unit tests
-    test_url_scheme.py # URL scheme unit tests
-    integration/       # Live database tests (require Fantastical)
-```
-
-### Running tests
-
-```bash
-# Unit tests (no Fantastical required)
-pytest tests/ --ignore=tests/integration -v
-
-# Integration tests (requires Fantastical installed with calendar data)
-pytest tests/integration/ -v -m integration
-```
-
-### Setting up for development
-
-```bash
-uv venv
-uv pip install -e ".[test]"
-```
+- [Tool reference](docs/tools.md) -- Detailed parameters and example output for every tool
+- [Configuration guide](docs/configuration.md) -- Environment variables, transport options, calendar exclusion
+- [How it works](docs/how-it-works.md) -- Technical architecture and design decisions
+- [Development guide](docs/development.md) -- Project structure, testing, and contributing
 
 ## Licence
 
