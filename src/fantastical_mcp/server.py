@@ -132,12 +132,15 @@ async def get_availability(date: str, calendars: list[str] | None = None) -> str
     """
     db = _get_db()
     try:
-        target = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        naive = datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         return f"Invalid date format: {date}. Use YYYY-MM-DD."
 
-    start = target.replace(hour=0, minute=0, second=0)
-    end = start + timedelta(days=1)
+    # Anchor to local midnight, then convert to UTC for the database query.
+    local_start = naive.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    local_end = local_start + timedelta(days=1)
+    start = local_start.astimezone(timezone.utc)
+    end = local_end.astimezone(timezone.utc)
 
     if calendars:
         events = []
@@ -145,7 +148,7 @@ async def get_availability(date: str, calendars: list[str] | None = None) -> str
             events.extend(db.get_events_by_calendar(cal, days=1))
         events = [
             e for e in events
-            if e.get("start") and e["start"].date() == target.date()
+            if e.get("start") and e["start"].date() == local_start.date()
         ]
     else:
         events = db.get_events_in_range(start, end)
