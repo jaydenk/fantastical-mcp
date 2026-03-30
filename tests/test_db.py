@@ -465,6 +465,8 @@ def _insert_event(
     notes: str = "",
     hidden: int | None = None,
     is_all_day: int = 0,
+    recurring: int = 0,
+    invitation_needs_action: int = 0,
 ) -> None:
     """Insert an event into database2, secondaryIndex, and fts_fts."""
     cur = conn.cursor()
@@ -481,9 +483,11 @@ def _insert_event(
     ns_end = _datetime_to_nsdate(end)
     cur.execute(
         "INSERT INTO secondaryIndex_index_calendarItems "
-        "(rowid, calendarIdentifier, startDate, recurrenceEndDate, hidden, isAllDayOrFloating) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (rowid, cal_id, ns_start, ns_end, hidden, is_all_day),
+        "(rowid, calendarIdentifier, startDate, recurrenceEndDate, hidden, "
+        "isAllDayOrFloating, recurring, invitationNeedsAction) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (rowid, cal_id, ns_start, ns_end, hidden, is_all_day, recurring,
+         invitation_needs_action),
     )
 
     # fts_fts row (uses implicit rowid)
@@ -937,5 +941,289 @@ class TestTimezoneAwareDateRange:
             else:
                 # In UTC or negative-offset zones, event is still within range
                 assert "Early Focus Time" in titles
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Recurring events tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecurringEvents:
+    def test_returns_recurring_events(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        future = now + timedelta(hours=2)
+
+        blob = _create_event_blob(
+            title="Weekly Standup",
+            calendar_id="abc123",
+            start=future,
+            end=future + timedelta(hours=1),
+            has_recurrence=True,
+        )
+        _insert_event(
+            conn, rowid=400, cal_id="abc123", blob=blob,
+            start=future, end=future + timedelta(hours=1),
+            title="Weekly Standup", recurring=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recurring_events()
+            assert any(e["title"] == "Weekly Standup" for e in events)
+        finally:
+            db.close()
+
+    def test_excludes_non_recurring(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        future = now + timedelta(hours=2)
+
+        for i, (title, rec) in enumerate([
+            ("Recurring Meeting", 1),
+            ("One-off Lunch", 0),
+        ]):
+            blob = _create_event_blob(
+                title=title, calendar_id="abc123",
+                start=future, end=future + timedelta(hours=1),
+                has_recurrence=bool(rec),
+            )
+            _insert_event(
+                conn, rowid=410 + i, cal_id="abc123", blob=blob,
+                start=future, end=future + timedelta(hours=1),
+                title=title, recurring=rec,
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recurring_events()
+            titles = [e["title"] for e in events]
+            assert "Recurring Meeting" in titles
+            assert "One-off Lunch" not in titles
+        finally:
+            db.close()
+
+    def test_filter_by_calendar(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        future = now + timedelta(hours=2)
+
+        for i, (title, cal_id) in enumerate([
+            ("Work Standup", "abc123"),
+            ("Personal Yoga", "def456"),
+        ]):
+            blob = _create_event_blob(
+                title=title, calendar_id=cal_id,
+                start=future, end=future + timedelta(hours=1),
+                has_recurrence=True,
+            )
+            _insert_event(
+                conn, rowid=420 + i, cal_id=cal_id, blob=blob,
+                start=future, end=future + timedelta(hours=1),
+                title=title, recurring=1,
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recurring_events(calendar_name="Work")
+            titles = [e["title"] for e in events]
+            assert "Work Standup" in titles
+            assert "Personal Yoga" not in titles
+        finally:
+            db.close()
+
+    def test_excludes_past_events(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        past = now - timedelta(days=7)
+
+        blob = _create_event_blob(
+            title="Old Recurring", calendar_id="abc123",
+            start=past, end=past + timedelta(hours=1),
+            has_recurrence=True,
+        )
+        _insert_event(
+            conn, rowid=430, cal_id="abc123", blob=blob,
+            start=past, end=past + timedelta(hours=1),
+            title="Old Recurring", recurring=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recurring_events()
+            titles = [e["title"] for e in events]
+            assert "Old Recurring" not in titles
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Pending invitations tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetPendingInvitations:
+    def test_returns_invitations(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        future = now + timedelta(hours=2)
+
+        blob = _create_event_blob(
+            title="Team Dinner", calendar_id="abc123",
+            start=future, end=future + timedelta(hours=2),
+        )
+        _insert_event(
+            conn, rowid=500, cal_id="abc123", blob=blob,
+            start=future, end=future + timedelta(hours=2),
+            title="Team Dinner", invitation_needs_action=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_pending_invitations()
+            assert any(e["title"] == "Team Dinner" for e in events)
+        finally:
+            db.close()
+
+    def test_excludes_non_invitations(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+        future = now + timedelta(hours=2)
+
+        for i, (title, inv) in enumerate([
+            ("Pending Invite", 1),
+            ("Normal Event", 0),
+        ]):
+            blob = _create_event_blob(
+                title=title, calendar_id="abc123",
+                start=future, end=future + timedelta(hours=1),
+            )
+            _insert_event(
+                conn, rowid=510 + i, cal_id="abc123", blob=blob,
+                start=future, end=future + timedelta(hours=1),
+                title=title, invitation_needs_action=inv,
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_pending_invitations()
+            titles = [e["title"] for e in events]
+            assert "Pending Invite" in titles
+            assert "Normal Event" not in titles
+        finally:
+            db.close()
+
+    def test_respects_limit(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+
+        for i in range(5):
+            future = now + timedelta(hours=i + 1)
+            blob = _create_event_blob(
+                title=f"Invite {i}", calendar_id="abc123",
+                start=future, end=future + timedelta(hours=1),
+            )
+            _insert_event(
+                conn, rowid=520 + i, cal_id="abc123", blob=blob,
+                start=future, end=future + timedelta(hours=1),
+                title=f"Invite {i}", invitation_needs_action=1,
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_pending_invitations(limit=2)
+            assert len(events) <= 2
+        finally:
+            db.close()
+
+
+# ---------------------------------------------------------------------------
+# Recent events tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetRecentEvents:
+    def test_returns_recent_by_rowid(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+
+        for i, (rowid, title) in enumerate([
+            (600, "Older Event"),
+            (601, "Newer Event"),
+        ]):
+            start = now + timedelta(hours=i)
+            blob = _create_event_blob(
+                title=title, calendar_id="abc123",
+                start=start, end=start + timedelta(hours=1),
+            )
+            _insert_event(
+                conn, rowid=rowid, cal_id="abc123", blob=blob,
+                start=start, end=start + timedelta(hours=1),
+                title=title,
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recent_events(limit=2)
+            # Newest (highest rowid) should come first
+            assert events[0]["title"] == "Newer Event"
+            assert events[1]["title"] == "Older Event"
+        finally:
+            db.close()
+
+    def test_respects_limit(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+
+        for i in range(5):
+            start = now + timedelta(hours=i)
+            blob = _create_event_blob(
+                title=f"Event {i}", calendar_id="abc123",
+                start=start, end=start + timedelta(hours=1),
+            )
+            _insert_event(
+                conn, rowid=610 + i, cal_id="abc123", blob=blob,
+                start=start, end=start + timedelta(hours=1),
+                title=f"Event {i}",
+            )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recent_events(limit=3)
+            assert len(events) <= 3
+        finally:
+            db.close()
+
+    def test_excludes_hidden(self, test_db):
+        conn = sqlite3.connect(str(test_db))
+        now = datetime.now(tz=timezone.utc)
+
+        blob = _create_event_blob(
+            title="Hidden Event", calendar_id="abc123",
+            start=now, end=now + timedelta(hours=1),
+        )
+        _insert_event(
+            conn, rowid=620, cal_id="abc123", blob=blob,
+            start=now, end=now + timedelta(hours=1),
+            title="Hidden Event", hidden=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_recent_events()
+            titles = [e["title"] for e in events]
+            assert "Hidden Event" not in titles
         finally:
             db.close()
