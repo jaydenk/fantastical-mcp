@@ -18,6 +18,12 @@ fantastical-mcp reads calendar events directly from Fantastical's local SQLite d
 
 ## Quick start
 
+### Claude Desktop (1-click install)
+
+1. Download `fantastical-mcp-0.1.0.mcpb` from the [latest release](https://github.com/jaydenk/fantastical-mcp/releases/latest)
+2. Double-click the file
+3. Done — Fantastical tools are now available in Claude Desktop
+
 ### Install from PyPI
 
 ```bash

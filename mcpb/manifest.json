@@ -1,0 +1,67 @@
+{
+  "manifest_version": "0.3",
+  "name": "fantastical-mcp",
+  "version": "0.1.0",
+  "description": "Read and create Fantastical calendar events. Queries events by date, calendar, or search. Creates events via natural language. No API keys or TCC permissions needed.",
+  "author": {
+    "name": "Jayden Kerr"
+  },
+  "tools": [
+    {
+      "name": "get_today",
+      "description": "Get all calendar events for today"
+    },
+    {
+      "name": "get_upcoming",
+      "description": "Get events for the next N days"
+    },
+    {
+      "name": "get_calendars",
+      "description": "List all calendars with event counts"
+    },
+    {
+      "name": "get_event",
+      "description": "Get full details for a specific event"
+    },
+    {
+      "name": "search_events",
+      "description": "Full-text search across events"
+    },
+    {
+      "name": "get_events_by_calendar",
+      "description": "Get events from a specific calendar"
+    },
+    {
+      "name": "get_availability",
+      "description": "Show free/busy time slots for a date"
+    },
+    {
+      "name": "get_recurring",
+      "description": "List recurring events"
+    },
+    {
+      "name": "get_invitations",
+      "description": "List pending event invitations"
+    },
+    {
+      "name": "get_recent",
+      "description": "Show recently added events"
+    },
+    {
+      "name": "create_event",
+      "description": "Create an event using natural language"
+    },
+    {
+      "name": "show_date",
+      "description": "Open Fantastical to a specific date"
+    }
+  ],
+  "server": {
+    "type": "python",
+    "entry_point": "server/stub.py",
+    "mcp_config": {
+      "command": "uvx",
+      "args": ["fantastical-mcp"]
+    }
+  }
+}
