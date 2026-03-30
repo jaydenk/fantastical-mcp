@@ -541,13 +541,22 @@ class FantasticalDB:
         Instead we return all recurring events that have no end date or
         whose recurrence end date is in the future.
 
-        Optionally filtered to a single calendar by name.
+        Optionally filtered to a single calendar by name.  Excluded
+        calendars (both global and recurring-specific) are filtered in
+        SQL to avoid consuming the LIMIT with unwanted rows.
         """
         now = datetime.now(tz=timezone.utc)
         ns_now = now.timestamp() - NSDATE_OFFSET
 
+        # Build the set of calendar IDs to exclude in SQL.
+        exclude_ids = [
+            cid
+            for cid, name in self._cal_registry.items()
+            if name in self._exclude or name in self._recurring_exclude
+        ]
+
         cur = self._conn.cursor()
-        # Over-fetch to compensate for Python-side calendar exclusion.
+        # Over-fetch to compensate for any remaining Python-side filtering.
         fetch_limit = limit * 3
 
         if calendar_name:
@@ -559,6 +568,7 @@ class FantasticalDB:
             if not cal_ids:
                 return []
             placeholders = ",".join("?" for _ in cal_ids)
+            exclude_placeholders = ",".join("?" for _ in exclude_ids)
             cur.execute(
                 "SELECT d.rowid, d.data, si.calendarIdentifier "
                 "FROM database2 d "
@@ -566,31 +576,33 @@ class FantasticalDB:
                 f"WHERE si.recurring = 1 "
                 f"AND (si.recurrenceEndDate IS NULL OR si.recurrenceEndDate >= ?) "
                 f"AND si.calendarIdentifier IN ({placeholders}) "
-                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                + (f"AND si.calendarIdentifier NOT IN ({exclude_placeholders}) "
+                   if exclude_ids else "")
+                + "AND (si.hidden IS NULL OR si.hidden = 0) "
                 "ORDER BY si.startDate ASC "
                 "LIMIT ?",
-                (ns_now, *cal_ids, fetch_limit),
+                (ns_now, *cal_ids, *exclude_ids, fetch_limit),
             )
         else:
+            exclude_placeholders = ",".join("?" for _ in exclude_ids)
             cur.execute(
                 "SELECT d.rowid, d.data, si.calendarIdentifier "
                 "FROM database2 d "
                 "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
                 "WHERE si.recurring = 1 "
                 "AND (si.recurrenceEndDate IS NULL OR si.recurrenceEndDate >= ?) "
-                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                + (f"AND si.calendarIdentifier NOT IN ({exclude_placeholders}) "
+                   if exclude_ids else "")
+                + "AND (si.hidden IS NULL OR si.hidden = 0) "
                 "ORDER BY si.startDate ASC "
                 "LIMIT ?",
-                (ns_now, fetch_limit),
+                (ns_now, *exclude_ids, fetch_limit),
             )
 
         results: list[dict] = []
         for row in cur.fetchall():
             if len(results) >= limit:
                 break
-            cal_id: str = row["calendarIdentifier"]
-            if self._is_recurring_excluded(cal_id):
-                continue
             event = self._decode_with_fts_fallback(row["rowid"], row["data"])
             if event is not None:
                 results.append(event)
