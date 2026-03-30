@@ -821,3 +821,121 @@ class TestGetEventById:
             assert event is None
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# Timezone-aware range query tests
+# ---------------------------------------------------------------------------
+
+# Local timezone for building test datetimes that correspond to predictable
+# local-clock values, matching the pattern used in test_formatters.py.
+_LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+
+class TestTimezoneAwareDateRange:
+    """Verify that querying with local-midnight bounds captures early-morning
+    events whose UTC timestamp falls on the previous calendar day.
+
+    This reproduces the bug where get_availability used UTC midnight instead
+    of local midnight, causing events before the UTC offset hour to be missed.
+    """
+
+    def test_early_morning_event_found_with_local_midnight_bounds(self, test_db):
+        """An 08:30 local event should appear when querying from local midnight,
+        even if its UTC timestamp falls on the previous calendar day."""
+        conn = sqlite3.connect(str(test_db))
+
+        # Pick a target date: tomorrow in local time.
+        tomorrow_local = datetime.now(tz=_LOCAL_TZ) + timedelta(days=1)
+        target_date = tomorrow_local.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        # Create an event at 08:30 local time on the target date.
+        # In positive-offset timezones (e.g. ACDT +10:30), the UTC timestamp
+        # is 22:00 the PREVIOUS day — the exact scenario that was broken.
+        event_start = target_date.replace(hour=8, minute=30)
+        event_end = target_date.replace(hour=9, minute=30)
+
+        blob = _create_event_blob(
+            title="Early Focus Time",
+            calendar_id="abc123",
+            start=event_start.astimezone(timezone.utc),
+            end=event_end.astimezone(timezone.utc),
+        )
+        _insert_event(
+            conn,
+            rowid=300,
+            cal_id="abc123",
+            blob=blob,
+            start=event_start.astimezone(timezone.utc),
+            end=event_end.astimezone(timezone.utc),
+            title="Early Focus Time",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            # Query using local-midnight-anchored UTC bounds (the correct way).
+            local_start = target_date
+            local_end = local_start + timedelta(days=1)
+            utc_start = local_start.astimezone(timezone.utc)
+            utc_end = local_end.astimezone(timezone.utc)
+
+            events = db.get_events_in_range(utc_start, utc_end)
+            titles = [e["title"] for e in events]
+            assert "Early Focus Time" in titles
+        finally:
+            db.close()
+
+    def test_early_morning_event_missed_with_utc_midnight_bounds(self, test_db):
+        """Demonstrates the bug: UTC midnight bounds miss early-morning local
+        events in positive-offset timezones."""
+        conn = sqlite3.connect(str(test_db))
+
+        tomorrow_local = datetime.now(tz=_LOCAL_TZ) + timedelta(days=1)
+        target_date = tomorrow_local.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        event_start = target_date.replace(hour=8, minute=30)
+        event_end = target_date.replace(hour=9, minute=30)
+
+        blob = _create_event_blob(
+            title="Early Focus Time",
+            calendar_id="abc123",
+            start=event_start.astimezone(timezone.utc),
+            end=event_end.astimezone(timezone.utc),
+        )
+        _insert_event(
+            conn,
+            rowid=301,
+            cal_id="abc123",
+            blob=blob,
+            start=event_start.astimezone(timezone.utc),
+            end=event_end.astimezone(timezone.utc),
+            title="Early Focus Time",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            # Query using UTC midnight bounds (the old, buggy way).
+            utc_start = target_date.replace(tzinfo=timezone.utc)
+            utc_end = utc_start + timedelta(days=1)
+
+            events = db.get_events_in_range(utc_start, utc_end)
+            titles = [e["title"] for e in events]
+
+            # In UTC+ timezones, the event's UTC timestamp falls on the
+            # previous day, so it will be missed.  In UTC or UTC- timezones,
+            # the event still falls within the UTC range.
+            utc_offset_hours = _LOCAL_TZ.utcoffset(datetime.now()).total_seconds() / 3600
+            if utc_offset_hours > 8.5:
+                # Event at 08:30 local → UTC timestamp is on the previous day
+                assert "Early Focus Time" not in titles
+            else:
+                # In UTC or negative-offset zones, event is still within range
+                assert "Early Focus Time" in titles
+        finally:
+            db.close()
