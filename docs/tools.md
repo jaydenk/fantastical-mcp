@@ -1,6 +1,6 @@
 # Tool Reference
 
-fantastical-mcp exposes 9 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme).
+fantastical-mcp exposes 12 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme).
 
 ---
 
@@ -169,6 +169,78 @@ Free: 15:00 -- 18:00 (3h)
 All-day events:
   Labour Day (id:86125)
 ```
+
+---
+
+### `get_recurring`
+
+List upcoming recurring events, optionally filtered by calendar. Useful for understanding the regular schedule (standups, focus blocks, coaching shifts, etc.).
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `calendar` | `str` | `None` (all calendars) | Optional calendar name to filter by. Use `get_calendars` to see available names. |
+| `limit` | `int` | `50` | Maximum number of results |
+
+**Example output:**
+
+```
+Work
+  09:00 -- 10:00  Team Standup @ Meeting Room A (recurring) (id:42)
+  14:00 -- 15:00  Sprint Review (recurring) (id:108)
+
+Personal
+  06:30 -- 07:30  Morning Yoga (recurring) (id:215)
+```
+
+Results are grouped by calendar and ordered by start date ascending. Only future instances are shown.
+
+---
+
+### `get_invitations`
+
+List pending event invitations that need a response, ordered by start date (soonest first).
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `limit` | `int` | `20` | Maximum number of results |
+
+**Example output:**
+
+```
+Wednesday 2 April 2026
+  10:00 -- 11:00  Architecture Review @ Conference Room B (id:312)
+
+Friday 4 April 2026
+  15:00 -- 16:00  End of Quarter Drinks @ The Exeter (id:340)
+```
+
+---
+
+### `get_recent`
+
+Show the most recently added or synced calendar events. Useful for seeing what's new on the calendar without knowing specific dates.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `limit` | `int` | `10` | Maximum number of results |
+
+**Example output:**
+
+```
+Thursday 10 April 2026
+  16:15 -- 18:45  Performance @ Glenelg (id:88958)
+
+Monday 7 April 2026
+  09:00 -- 10:00  Onboarding Kickoff (id:90650)
+```
+
+Results are ordered by recency (most recently added/synced first), not by event date.
 
 ---
 

@@ -508,6 +508,119 @@ class FantasticalDB:
 
         return self._decode_with_fts_fallback(row["rowid"], row["data"])
 
+    def get_recurring_events(
+        self, calendar_name: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        """Return upcoming recurring events.
+
+        Optionally filtered to a single calendar by name.  Only future
+        events are returned, ordered by start date ascending.
+        """
+        now = datetime.now(tz=timezone.utc)
+        ns_now = now.timestamp() - NSDATE_OFFSET
+
+        cur = self._conn.cursor()
+
+        if calendar_name:
+            cal_ids = [
+                cid
+                for cid, name in self._cal_registry.items()
+                if name == calendar_name
+            ]
+            if not cal_ids:
+                return []
+            placeholders = ",".join("?" for _ in cal_ids)
+            cur.execute(
+                "SELECT d.rowid, d.data, si.calendarIdentifier "
+                "FROM database2 d "
+                "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+                f"WHERE si.recurring = 1 AND si.startDate >= ? "
+                f"AND si.calendarIdentifier IN ({placeholders}) "
+                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                "ORDER BY si.startDate ASC "
+                "LIMIT ?",
+                (ns_now, *cal_ids, limit),
+            )
+        else:
+            cur.execute(
+                "SELECT d.rowid, d.data, si.calendarIdentifier "
+                "FROM database2 d "
+                "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+                "WHERE si.recurring = 1 AND si.startDate >= ? "
+                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                "ORDER BY si.startDate ASC "
+                "LIMIT ?",
+                (ns_now, limit),
+            )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            cal_id: str = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
+
+    def get_pending_invitations(self, limit: int = 20) -> list[dict]:
+        """Return events with pending invitations, ordered by start date.
+
+        Uses the ``invitationNeedsAction`` flag in the secondary index.
+        Hidden events and events from excluded calendars are omitted.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE si.invitationNeedsAction = 1 "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            "ORDER BY si.startDate ASC "
+            "LIMIT ?",
+            (limit,),
+        )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            cal_id: str = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
+
+    def get_recent_events(self, limit: int = 10) -> list[dict]:
+        """Return the most recently added or synced events.
+
+        Uses ``rowid DESC`` ordering as a proxy for creation/sync time.
+        Hidden events and events from excluded calendars are omitted.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE (si.hidden IS NULL OR si.hidden = 0) "
+            "ORDER BY d.rowid DESC "
+            "LIMIT ?",
+            (limit,),
+        )
+
+        results: list[dict] = []
+        for row in cur.fetchall():
+            cal_id: str = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if event is not None:
+                results.append(event)
+
+        return results
+
     def close(self) -> None:
         """Close the underlying SQLite connection."""
         self._conn.close()
