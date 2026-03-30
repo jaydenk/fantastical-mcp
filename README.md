@@ -18,7 +18,7 @@ fantastical-mcp reads calendar events directly from Fantastical's local SQLite d
 
 ## Quick start
 
-### Published package (once on PyPI)
+### Install from PyPI
 
 ```bash
 uvx fantastical-mcp
