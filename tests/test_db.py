@@ -453,6 +453,9 @@ def _create_event_blob(
     return plistlib.dumps(plist, fmt=plistlib.FMT_BINARY)
 
 
+_SENTINEL = object()
+
+
 def _insert_event(
     conn: sqlite3.Connection,
     rowid: int,
@@ -467,8 +470,15 @@ def _insert_event(
     is_all_day: int = 0,
     recurring: int = 0,
     invitation_needs_action: int = 0,
+    recurrence_end: datetime | None | object = _SENTINEL,
 ) -> None:
-    """Insert an event into database2, secondaryIndex, and fts_fts."""
+    """Insert an event into database2, secondaryIndex, and fts_fts.
+
+    ``recurrence_end`` controls the ``recurrenceEndDate`` column:
+    * Omitted / sentinel — defaults to *end* (single-event behaviour).
+    * ``None`` — inserts NULL (recurring event with no termination).
+    * A datetime — inserts that value (recurring event with end date).
+    """
     cur = conn.cursor()
 
     # database2 row
@@ -480,14 +490,19 @@ def _insert_event(
 
     # secondaryIndex row
     ns_start = _datetime_to_nsdate(start)
-    ns_end = _datetime_to_nsdate(end)
+    if recurrence_end is _SENTINEL:
+        ns_recurrence_end = _datetime_to_nsdate(end)
+    elif recurrence_end is None:
+        ns_recurrence_end = None
+    else:
+        ns_recurrence_end = _datetime_to_nsdate(recurrence_end)
     cur.execute(
         "INSERT INTO secondaryIndex_index_calendarItems "
         "(rowid, calendarIdentifier, startDate, recurrenceEndDate, hidden, "
         "isAllDayOrFloating, recurring, invitationNeedsAction) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (rowid, cal_id, ns_start, ns_end, hidden, is_all_day, recurring,
-         invitation_needs_action),
+        (rowid, cal_id, ns_start, ns_recurrence_end, hidden, is_all_day,
+         recurring, invitation_needs_action),
     )
 
     # fts_fts row (uses implicit rowid)
@@ -1037,20 +1052,21 @@ class TestGetRecurringEvents:
         finally:
             db.close()
 
-    def test_excludes_past_events(self, test_db):
+    def test_includes_active_recurring_with_past_start(self, test_db):
+        """Recurring events with past start dates but no end date are active."""
         conn = sqlite3.connect(str(test_db))
         now = datetime.now(tz=timezone.utc)
-        past = now - timedelta(days=7)
+        past = now - timedelta(days=90)
 
         blob = _create_event_blob(
-            title="Old Recurring", calendar_id="abc123",
+            title="Old But Active", calendar_id="abc123",
             start=past, end=past + timedelta(hours=1),
             has_recurrence=True,
         )
         _insert_event(
             conn, rowid=430, cal_id="abc123", blob=blob,
             start=past, end=past + timedelta(hours=1),
-            title="Old Recurring", recurring=1,
+            title="Old But Active", recurring=1, recurrence_end=None,
         )
         conn.close()
 
@@ -1058,7 +1074,8 @@ class TestGetRecurringEvents:
         try:
             events = db.get_recurring_events()
             titles = [e["title"] for e in events]
-            assert "Old Recurring" not in titles
+            # recurrenceEndDate is NULL so the event is still active
+            assert "Old But Active" in titles
         finally:
             db.close()
 
