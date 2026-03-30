@@ -6,7 +6,7 @@
 fantastical-mcp/
   src/fantastical_mcp/
     __init__.py          # Package entry point, exports `mcp`
-    server.py            # FastMCP server definition and 9 tool handlers
+    server.py            # FastMCP server definition and 12 tool handlers
     db.py                # SQLite database access layer (read-only)
     formatters.py        # Plain-text output formatters (Australian English)
     url_scheme.py        # URL scheme helpers for writes (x-fantastical3://)
@@ -29,7 +29,7 @@ fantastical-mcp/
 
 | Module | Responsibility |
 |--------|---------------|
-| `server.py` | Defines the `FastMCP` instance, registers all 9 tools, manages the database singleton, handles transport configuration. Entry point via `main()`. |
+| `server.py` | Defines the `FastMCP` instance, registers all 12 tools, initialises the database connection at import, handles transport configuration. Entry point via `main()`. |
 | `db.py` | All SQLite interaction. Opens the database read-only, loads the calendar registry from blob data, decodes event blobs, provides query methods. Contains the three-tier read strategy and FTS fallback logic. |
 | `formatters.py` | Converts event dicts into plain-text output. Groups events by date or calendar. Formats availability as free/busy blocks. All display text uses Australian English. |
 | `url_scheme.py` | Builds `x-fantastical3://` URLs and executes them via `subprocess.run(["open", ...])`. |
