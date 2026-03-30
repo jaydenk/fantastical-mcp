@@ -157,6 +157,59 @@ async def get_availability(date: str, calendars: list[str] | None = None) -> str
 
 
 @mcp.tool
+async def get_recurring(
+    calendar: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List upcoming recurring events, optionally filtered by calendar.
+
+    Useful for understanding the regular schedule (standups, focus blocks, etc.).
+
+    Args:
+        calendar: Optional calendar name to filter by. Use get_calendars to see available names.
+        limit: Maximum number of results (default 50).
+    """
+    db = _get_db()
+    events = db.get_recurring_events(calendar_name=calendar, limit=limit)
+    if not events:
+        msg = "No upcoming recurring events"
+        if calendar:
+            msg += f" in '{calendar}'"
+        return msg + "."
+    return format_events_by_calendar(events)
+
+
+@mcp.tool
+async def get_invitations(limit: int = 20) -> str:
+    """List pending event invitations that need a response.
+
+    Args:
+        limit: Maximum number of results (default 20).
+    """
+    db = _get_db()
+    events = db.get_pending_invitations(limit=limit)
+    if not events:
+        return "No pending invitations."
+    return format_events_by_date(events)
+
+
+@mcp.tool
+async def get_recent(limit: int = 10) -> str:
+    """Show the most recently added or synced calendar events.
+
+    Useful for seeing what's new on the calendar without knowing specific dates.
+
+    Args:
+        limit: Maximum number of results (default 10).
+    """
+    db = _get_db()
+    events = db.get_recent_events(limit=limit)
+    if not events:
+        return "No recent events."
+    return format_events_by_date(events)
+
+
+@mcp.tool
 async def create_event(
     sentence: str,
     calendar: str | None = None,
