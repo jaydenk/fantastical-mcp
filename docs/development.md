@@ -4,6 +4,9 @@
 
 ```
 fantastical-mcp/
+  .github/
+    workflows/
+      publish.yml        # CI/CD: runs tests then publishes to PyPI on tag push
   src/fantastical_mcp/
     __init__.py          # Package entry point, exports `mcp`
     server.py            # FastMCP server definition and 12 tool handlers
@@ -122,6 +125,33 @@ If any step fails, `decode_event` returns `None` and the caller falls back to FT
    - Use the `test_db` and `populated_db` fixtures to work with seeded in-memory databases.
 
 5. **Update documentation** in `docs/tools.md` with the new tool's parameters and example output.
+
+---
+
+## CI/CD
+
+The project uses a GitHub Actions workflow (`.github/workflows/publish.yml`) to automatically publish to PyPI when a version tag is pushed.
+
+### How it works
+
+1. Push a tag matching `v*` (e.g. `v0.2.0`).
+2. The **test** job runs unit tests on Ubuntu with Python 3.12. Integration tests are skipped as they require macOS with Fantastical installed.
+3. If tests pass, the **publish** job verifies that the tag version matches `pyproject.toml`, builds the package with `uv build`, and publishes to PyPI using [Trusted Publishers](https://docs.pypi.org/trusted-publishers/) (OIDC -- no API token secrets needed).
+
+### Release process
+
+```bash
+# 1. Update the version in pyproject.toml
+# 2. Commit the version bump
+git add pyproject.toml
+git commit -m "chore: bump version to 0.2.0"
+
+# 3. Tag and push
+git tag v0.2.0
+git push origin main --tags
+```
+
+The workflow requires a `pypi` environment configured in the GitHub repository settings with PyPI's Trusted Publisher OIDC integration.
 
 ---
 
