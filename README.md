@@ -1,5 +1,7 @@
 # Fantastical MCP
 
+[![Publish to PyPI](https://github.com/jaydenk/fantastical-mcp/actions/workflows/publish.yml/badge.svg)](https://github.com/jaydenk/fantastical-mcp/actions/workflows/publish.yml)
+
 An MCP server that gives AI assistants read/write access to your Fantastical calendar on macOS.
 
 ## What it does

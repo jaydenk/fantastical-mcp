@@ -134,7 +134,7 @@ The project uses a GitHub Actions workflow (`.github/workflows/publish.yml`) to 
 
 ### How it works
 
-1. Push a tag matching `v*` (e.g. `v0.2.0`).
+1. Push a semver tag (e.g. `v0.2.0`).
 2. The **test** job runs unit tests on Ubuntu with Python 3.12. Integration tests are skipped as they require macOS with Fantastical installed.
 3. If tests pass, the **publish** job verifies that the tag version matches `pyproject.toml`, builds the package with `uv build`, and publishes to PyPI using [Trusted Publishers](https://docs.pypi.org/trusted-publishers/) (OIDC -- no API token secrets needed).
 
@@ -151,7 +151,16 @@ git tag v0.2.0
 git push origin main --tags
 ```
 
-The workflow requires a `pypi` environment configured in the GitHub repository settings with PyPI's Trusted Publisher OIDC integration.
+### PyPI Trusted Publisher setup (one-time)
+
+The workflow uses [PyPI Trusted Publishers](https://docs.pypi.org/trusted-publishers/) (OIDC) for authentication. To configure:
+
+1. On [pypi.org](https://pypi.org): go to the project → Settings → Publishing → Add a new publisher
+   - Owner: `jaydenk`
+   - Repository: `fantastical-mcp`
+   - Workflow name: `publish.yml`
+   - Environment name: `pypi`
+2. On GitHub: go to repo Settings → Environments → New environment → name it `pypi`
 
 ---
 
