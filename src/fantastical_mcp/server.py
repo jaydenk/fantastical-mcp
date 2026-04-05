@@ -28,10 +28,13 @@ MAX_LIMIT = 200
 
 mcp = FastMCP("Fantastical")
 
-_db = FantasticalDB(find_database_path())
+_db: FantasticalDB | None = None
 
 
 def _get_db() -> FantasticalDB:
+    global _db
+    if _db is None:
+        _db = FantasticalDB(find_database_path())
     return _db
 
 
