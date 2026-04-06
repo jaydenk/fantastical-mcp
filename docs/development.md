@@ -137,6 +137,7 @@ The project uses a GitHub Actions workflow (`.github/workflows/publish.yml`) to 
 1. Push a semver tag (e.g. `v0.2.0`).
 2. The **test** job runs unit tests on Ubuntu with Python 3.12. Integration tests are skipped as they require macOS with Fantastical installed.
 3. If tests pass, the **publish** job verifies that the tag version matches `pyproject.toml`, builds the package with `uv build`, and publishes to PyPI using [Trusted Publishers](https://docs.pypi.org/trusted-publishers/) (OIDC -- no API token secrets needed).
+4. After a successful publish, the **release** job creates a GitHub Release for the tag with auto-generated release notes.
 
 ### Release process
 
