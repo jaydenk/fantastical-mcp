@@ -118,6 +118,31 @@ def resolve_uid(
     return objects[idx]
 
 
+def deep_resolve(objects: list, value: object, depth: int = 0) -> object:
+    """Recursively resolve every UID in a structure into plain Python values.
+
+    Used for recurrence rules and exception-date arrays where downstream
+    code needs the fully-expanded tree, not nested UID references.  Bounded
+    depth prevents runaway traversal on pathological blobs.  Strings,
+    numbers, and bools pass through unchanged.  The ``$class`` key is
+    dropped since it's NSKeyedArchiver bookkeeping.
+    """
+    if depth > 8:
+        return None
+    if isinstance(value, plistlib.UID):
+        resolved = resolve_uid(objects, value)
+        return deep_resolve(objects, resolved, depth + 1)
+    if isinstance(value, dict):
+        return {
+            k: deep_resolve(objects, v, depth + 1)
+            for k, v in value.items()
+            if k != "$class"
+        }
+    if isinstance(value, list):
+        return [deep_resolve(objects, v, depth + 1) for v in value]
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Main database class
 # ---------------------------------------------------------------------------
@@ -277,10 +302,66 @@ class FantasticalDB:
                     ),
                 }
 
-            # Recurrence: just whether one is present.
+            # Recurrence: capture the full rule dict plus exception/override
+            # date lists so the expansion layer can generate occurrences.
             recurrence_ref = resolve_uid(objects, root.get("recurrenceRule"))
             recurring = recurrence_ref is not None and isinstance(
                 recurrence_ref, dict
+            )
+            recurrence_rule = (
+                deep_resolve(objects, recurrence_ref) if recurring else None
+            )
+
+            exdate_ref = resolve_uid(objects, root.get("recurrenceExceptionDates"))
+            rdate_ref = resolve_uid(objects, root.get("recurrenceOccurrenceDates"))
+
+            def _nsdate_array(ref: object) -> list[datetime]:
+                if not (isinstance(ref, dict) and "NS.objects" in ref):
+                    return []
+                out: list[datetime] = []
+                for uid in ref["NS.objects"]:
+                    entry = resolve_uid(objects, uid)
+                    if isinstance(entry, dict) and "NS.time" in entry:
+                        out.append(nsdate_to_datetime(entry["NS.time"]))
+                return out
+
+            exception_dates = _nsdate_array(exdate_ref)
+            occurrence_dates = _nsdate_array(rdate_ref)
+
+            series_end_obj = resolve_uid(objects, root.get("recurrenceEndDate"))
+            series_end = (
+                nsdate_to_datetime(series_end_obj["NS.time"])
+                if isinstance(series_end_obj, dict) and "NS.time" in series_end_obj
+                else None
+            )
+
+            # The event's timezone drives recurrence expansion: rules like
+            # "3rd Thursday of the month" are always anchored to the original
+            # authoring zone, not UTC.  The blob stores the full tz data as
+            # an NSTimeZone archive; both ``NS.name`` and ``NS.data`` inside
+            # are themselves UID references that need resolving before the
+            # IANA name is readable.
+            tz_obj = deep_resolve(objects, root.get("timeZone"))
+            tz_name: str | None = None
+            if isinstance(tz_obj, dict):
+                candidate = tz_obj.get("NS.name")
+                if isinstance(candidate, str):
+                    tz_name = candidate
+
+            exchange_uid_val = resolve_uid(objects, root.get("exchangeUID"))
+            exchange_uid = (
+                exchange_uid_val if isinstance(exchange_uid_val, str) else None
+            )
+
+            is_detached_ref = resolve_uid(objects, root.get("isDetached"))
+            is_detached = (
+                bool(is_detached_ref) if isinstance(is_detached_ref, bool) else False
+            )
+            inst_obj = resolve_uid(objects, root.get("recurrenceInstanceDate"))
+            instance_date = (
+                nsdate_to_datetime(inst_obj["NS.time"])
+                if isinstance(inst_obj, dict) and "NS.time" in inst_obj
+                else None
             )
 
             conf_ref = resolve_uid(objects, root.get("conferenceType"))
@@ -299,6 +380,14 @@ class FantasticalDB:
                 "calendar": self._cal_registry.get(cal_id_str, ""),
                 "is_all_day": is_all_day,
                 "recurring": recurring,
+                "recurrence_rule": recurrence_rule,
+                "exception_dates": exception_dates,
+                "occurrence_dates": occurrence_dates,
+                "series_end": series_end,
+                "is_detached": is_detached,
+                "instance_date": instance_date,
+                "tz_name": tz_name,
+                "exchange_uid": exchange_uid,
                 "attendees": attendees_list,
                 "organizer": organizer_dict,
                 "conference_type": conference_type,
@@ -348,6 +437,14 @@ class FantasticalDB:
                 "calendar": self._cal_registry.get(cal_id, ""),
                 "is_all_day": bool(si_row["isAllDayOrFloating"]),
                 "recurring": bool(si_row["recurring"]),
+                "recurrence_rule": None,
+                "exception_dates": [],
+                "occurrence_dates": [],
+                "series_end": None,
+                "is_detached": False,
+                "instance_date": None,
+                "tz_name": None,
+                "exchange_uid": None,
                 "attendees": [],
                 "organizer": None,
                 "conference_type": 0,
@@ -406,26 +503,63 @@ class FantasticalDB:
     def get_events_in_range(
         self, start: datetime, end: datetime
     ) -> list[dict]:
-        """Return decoded events whose start date falls within *[start, end)*.
+        """Return decoded events occurring within *[start, end)*.
+
+        Non-recurring events are returned when their ``startDate`` falls in
+        the window.  Recurring series are expanded into per-occurrence
+        dicts with adjusted ``start``/``end`` times; EXDATEs are removed
+        and RDATEs are added.  Detached single-instance events (moved or
+        edited occurrences) come through the non-recurring path with their
+        new ``startDate``.
 
         Events from excluded calendars and hidden events are omitted.
         Results are ordered by start date ascending.
         """
-        ns_start = start.timestamp() - NSDATE_OFFSET
-        ns_end = end.timestamp() - NSDATE_OFFSET
+        return self._collect_occurrences(start, end, calendar_ids=None)
+
+    def _collect_occurrences(
+        self,
+        window_start: datetime,
+        window_end: datetime,
+        calendar_ids: list[str] | None,
+    ) -> list[dict]:
+        """Shared workhorse for range queries — handles expansion and filters.
+
+        When ``calendar_ids`` is ``None``, all non-excluded calendars are
+        included.  When a list is supplied, only those calendar ids are
+        queried (the exclusion set is still honoured so callers don't need
+        to pre-filter).
+        """
+        ns_start = window_start.timestamp() - NSDATE_OFFSET
+        ns_end = window_end.timestamp() - NSDATE_OFFSET
+
+        cal_clause = ""
+        cal_params: tuple = ()
+        if calendar_ids is not None:
+            if not calendar_ids:
+                return []
+            placeholders = ",".join("?" for _ in calendar_ids)
+            cal_clause = f"AND si.calendarIdentifier IN ({placeholders}) "
+            cal_params = tuple(calendar_ids)
 
         cur = self._conn.cursor()
+        results: list[dict] = []
+
+        # --- Pass 1: non-recurring rows whose startDate lies in the window.
+        # This also catches detached single-instance events — they have
+        # recurring=0 in the index and store their NEW startDate, so range
+        # filtering works the same as for one-off events.
         cur.execute(
             "SELECT d.rowid, d.data, si.calendarIdentifier "
             "FROM database2 d "
             "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
-            "WHERE si.startDate >= ? AND si.startDate < ? "
+            "WHERE (si.recurring IS NULL OR si.recurring = 0) "
+            "AND si.startDate >= ? AND si.startDate < ? "
             "AND (si.hidden IS NULL OR si.hidden = 0) "
+            f"{cal_clause}"
             "ORDER BY si.startDate ASC",
-            (ns_start, ns_end),
+            (ns_start, ns_end, *cal_params),
         )
-
-        results: list[dict] = []
         for row in cur.fetchall():
             cal_id: str = row["calendarIdentifier"]
             if self._is_excluded(cal_id):
@@ -434,6 +568,124 @@ class FantasticalDB:
             if event is not None:
                 results.append(event)
 
+        # --- Pass 2: recurring masters that could produce an occurrence in
+        # the window.  A master is eligible when its anchor is before the
+        # window's end AND either has no end date or ends at/after the
+        # window's start.  Note that recurrenceEndDate uses a far-future
+        # sentinel (~4001) to mean "open-ended", so the >= check naturally
+        # passes for those rows too.
+        cur.execute(
+            "SELECT d.rowid, d.data, si.calendarIdentifier "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE si.recurring = 1 "
+            "AND si.startDate < ? "
+            "AND (si.recurrenceEndDate IS NULL OR si.recurrenceEndDate >= ?) "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            f"{cal_clause}"
+            "ORDER BY si.startDate ASC",
+            (ns_end, ns_start, *cal_params),
+        )
+        for row in cur.fetchall():
+            cal_id = row["calendarIdentifier"]
+            if self._is_excluded(cal_id):
+                continue
+            master = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            if master is None or master.get("start") is None:
+                continue
+            for occ in self._expand_master(master, window_start, window_end):
+                results.append(occ)
+
+        results.sort(
+            key=lambda e: e.get("start") or datetime.max.replace(tzinfo=timezone.utc)
+        )
+        return results
+
+    def _detached_instance_dates(self, master: dict) -> list[datetime]:
+        """Return the original-occurrence dates of every detached sibling.
+
+        When a user moves or edits a single occurrence of a recurring series,
+        Fantastical creates a separate "detached" event row with
+        ``recurring=0``, ``isDetached=true``, and
+        ``recurrenceInstanceDate`` pointing at the original date being
+        replaced.  The master *usually* also records that date in its
+        ``recurrenceExceptionDates`` so the expansion doesn't emit a ghost
+        — but not always (observed: moved occurrences on Exchange calendars
+        with EXDATE left empty).
+
+        Siblings are linked by shared ``exchangeUID``.  We scan the
+        secondary index (which stores ``exchangeUID`` as a column) and
+        decode only matching rows — much cheaper than reading every blob.
+        Returns an empty list if the master lacks an ``exchangeUID``
+        (typical for some local/CalDAV calendars), since we have no
+        reliable way to find siblings in that case; those calendars tend
+        to use EXDATE anyway.
+        """
+        exchange_uid = master.get("exchange_uid")
+        if not exchange_uid:
+            return []
+
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT d.rowid, d.data "
+            "FROM database2 d "
+            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+            "WHERE si.exchangeUID = ? "
+            "AND (si.recurring IS NULL OR si.recurring = 0) "
+            "AND (si.hidden IS NULL OR si.hidden = 0) "
+            "AND d.rowid != ?",
+            (exchange_uid, master["rowid"]),
+        )
+
+        dates: list[datetime] = []
+        for row in cur.fetchall():
+            sibling = self.decode_event(row["data"], row["rowid"])
+            if sibling is None:
+                continue
+            inst = sibling.get("instance_date")
+            if isinstance(inst, datetime):
+                dates.append(inst)
+        return dates
+
+    def _expand_master(
+        self,
+        master: dict,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[dict]:
+        """Turn a recurring-master event dict into per-occurrence event dicts."""
+        from .recurrence import expand  # local import to avoid cycles
+
+        anchor_start: datetime = master["start"]
+        anchor_end: datetime | None = master.get("end")
+        duration = (anchor_end - anchor_start) if anchor_end else None
+
+        exdates = list(master.get("exception_dates") or [])
+        # Phase 2 dedup: treat any detached sibling's original date as an
+        # extra EXDATE so we don't emit a ghost on top of the moved event.
+        exdates.extend(self._detached_instance_dates(master))
+
+        occurrences = expand(
+            rule=master.get("recurrence_rule"),
+            anchor_start=anchor_start,
+            window_start=window_start,
+            window_end=window_end,
+            exdates=exdates,
+            rdates=master.get("occurrence_dates") or [],
+            series_end=master.get("series_end"),
+            tz_name=master.get("tz_name"),
+        )
+
+        if not occurrences:
+            return []
+
+        results: list[dict] = []
+        for occ_start in occurrences:
+            occ = dict(master)
+            occ["start"] = occ_start
+            occ["end"] = (occ_start + duration) if duration else occ_start
+            occ["occurrence_of"] = master["rowid"]
+            results.append(occ)
         return results
 
     def search_events(self, query: str, limit: int = 20) -> list[dict]:
@@ -474,10 +726,10 @@ class FantasticalDB:
 
         Resolves *calendar_name* to one or more calendar identifiers via the
         internal registry.  The date window spans from *now* to
-        *now + days* days.  Returns an empty list if the calendar name is
-        not found.
+        *now + days* days.  Recurring series are expanded the same way as
+        :meth:`get_events_in_range`.  Returns an empty list if the
+        calendar name is not found.
         """
-        # Resolve name → id(s).
         cal_ids = [
             cid
             for cid, name in self._cal_registry.items()
@@ -488,29 +740,8 @@ class FantasticalDB:
 
         now = datetime.now(tz=timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        ns_start = today_start.timestamp() - NSDATE_OFFSET
-        ns_end = (today_start + timedelta(days=days)).timestamp() - NSDATE_OFFSET
-
-        placeholders = ",".join("?" for _ in cal_ids)
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT d.rowid, d.data, si.calendarIdentifier "
-            "FROM database2 d "
-            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
-            f"WHERE si.calendarIdentifier IN ({placeholders}) "
-            "AND si.startDate >= ? AND si.startDate < ? "
-            "AND (si.hidden IS NULL OR si.hidden = 0) "
-            "ORDER BY si.startDate ASC",
-            (*cal_ids, ns_start, ns_end),
-        )
-
-        results: list[dict] = []
-        for row in cur.fetchall():
-            event = self._decode_with_fts_fallback(row["rowid"], row["data"])
-            if event is not None:
-                results.append(event)
-
-        return results
+        window_end = today_start + timedelta(days=days)
+        return self._collect_occurrences(today_start, window_end, calendar_ids=cal_ids)
 
     def get_event(self, rowid: int) -> dict | None:
         """Look up a single event by its database rowid.

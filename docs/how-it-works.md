@@ -123,6 +123,55 @@ All dates in the secondary index table use NSDate timestamps. The server convert
 
 ---
 
+## Recurring Event Expansion
+
+The secondary index stores one row per event *series*, not one row per occurrence. The `startDate` column holds the series anchor (original first occurrence), not the next occurrence. A naive range query (`WHERE startDate BETWEEN ? AND ?`) therefore misses every recurring series whose anchor isn't itself inside the window -- which is almost all of them.
+
+To answer "what's on today?" correctly, `get_events_in_range` runs two passes:
+
+1. **Non-recurring rows** whose `startDate` falls in the window (covers one-off events and detached single-instance events -- see below).
+2. **Recurring masters** whose anchor is earlier than the window's end and whose `recurrenceEndDate` (if any) is after the window's start. Each master is expanded via `python-dateutil.rrule` into concrete occurrences inside the window.
+
+### EKRecurrenceRule mapping
+
+Fantastical stores each event's `recurrenceRule` as a keyed-archive of `EKRecurrenceRule` -- Apple's EventKit type -- verbatim. The fields map straight to RFC 5545 / `dateutil.rrule` kwargs:
+
+| Fantastical field | `dateutil` equivalent | Notes |
+|---|---|---|
+| `type` | `freq` | `0`/`1` = daily, `2` = weekly, `3` = monthly, `4` = yearly |
+| `interval` | `interval` | Every N periods |
+| `daysOfTheWeek` | `byweekday` | Each entry is `{dayOfTheWeek: 1..7, weekNumber: N}` -- EKWeekday (Sunday=1 … Saturday=7); non-zero `weekNumber` means "Nth weekday of month" |
+| `daysOfTheMonth` | `bymonthday` | |
+| `daysOfTheYear` | `byyearday` | |
+| `weeksOfTheYear` | `byweekno` | |
+| `monthsOfTheYear` | `bymonth` | |
+| `setPositions` | `bysetpos` | |
+| `occurrenceCount` | `count` | `0` means unlimited |
+| `endDate` | `until` | Nullable |
+| `firstDayOfTheWeek` | `wkst` | |
+
+`COUNT` and `UNTIL` are mutually exclusive per RFC 5545; when both are present on the series (rare), `COUNT` wins because it lives inside the rule itself and represents the authored intent.
+
+### Timezone-aware expansion
+
+Rules like "3rd Thursday of the month" must be evaluated in the event's original timezone, not UTC. An Adelaide meeting at 09:40 local anchors to a UTC timestamp of 23:10 the previous day; expanding that rule in UTC emits the 3rd Thursday of *UTC*, which can land a full calendar day later in local time. The event's `timeZone` field (an archived `NSTimeZone`) supplies the IANA name; expansion runs in that zone and only converts occurrences back to UTC for window filtering.
+
+### Exceptions and overrides
+
+Series masters also carry:
+
+- `recurrenceExceptionDates` (EXDATE) -- skipped occurrences.
+- `recurrenceOccurrenceDates` (RDATE) -- extra explicit occurrences.
+- `recurrenceEndDate` at the root, used as a series-level UNTIL when the rule itself has no `endDate`.
+
+### Detached occurrences (moved/edited single instances)
+
+When a user moves or edits a single occurrence, Fantastical creates a separate "detached" row with `recurring = 0`, `isDetached = true`, and `recurrenceInstanceDate` pointing to the original date being replaced. The detached row surfaces naturally through Pass 1 (its new `startDate` is a one-off row in the window).
+
+However, Fantastical doesn't always add the original date to the master's EXDATE list when a move happens over Exchange, which would otherwise produce a "ghost" occurrence at the original time *plus* the moved event at the new time. To prevent this, Pass 2 joins each master to its sibling detached rows via shared `exchangeUID` and feeds their `recurrenceInstanceDate` values in as additional EXDATEs during expansion. Series without an `exchangeUID` (some CalDAV / local calendars) rely purely on the master's own EXDATE list, which is the convention those calendar providers follow reliably.
+
+---
+
 ## URL Scheme for Writes
 
 Fantastical supports event creation via its `x-fantastical3://` URL scheme. The server constructs a URL and opens it via the macOS `open` command:

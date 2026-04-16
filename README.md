@@ -9,6 +9,7 @@ An MCP server that gives AI assistants read/write access to your Fantastical cal
 fantastical-mcp reads calendar events directly from Fantastical's local SQLite database and creates events via Fantastical's `x-fantastical3://` URL scheme. No TCC permissions, no API keys, no network access -- it works entirely offline using the data Fantastical already stores on your Mac.
 
 - **Read** -- Query events by date range, calendar, or full-text search
+- **Recurring events** -- Series are expanded into per-occurrence results with timezone-aware rule evaluation and de-duplication of moved occurrences
 - **Write** -- Create events using Fantastical's natural language parser
 - **Navigate** -- Open Fantastical to a specific date
 
