@@ -1244,3 +1244,314 @@ class TestGetRecentEvents:
             assert "Hidden Event" not in titles
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# Recurrence expansion + detached-occurrence dedup (Phase 1 + Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _rich_event_blob(
+    *,
+    title: str,
+    calendar_id: str,
+    start: datetime,
+    end: datetime,
+    recurrence_rule: dict | None = None,
+    exception_dates: list[datetime] | None = None,
+    exchange_uid: str | None = None,
+    is_detached: bool = False,
+    instance_date: datetime | None = None,
+    tz_name: str | None = None,
+) -> bytes:
+    """Build a keyed-archive blob with the fields Phase 1/2 rely on.
+
+    Lean relative to ``_create_event_blob``: we skip attendees/organiser and
+    only populate what the expansion pipeline reads.  Slot layout:
+
+    * ``[0]`` ``$null``
+    * ``[1]`` root dict
+    * ``[2]`` title
+    * ``[3]`` calendarIdentifier
+    * ``[4]`` startDate
+    * ``[5]`` endDate
+    * ``[6]`` recurrenceRule dict (or $null)
+    * ``[7]`` recurrenceExceptionDates array
+    * ``[8]`` exchangeUID (or $null)
+    * ``[9]`` recurrenceInstanceDate (or $null)
+    * ``[10]`` timeZone dict
+    * ``[11+]`` exception date entries ({"NS.time": ...})
+    * plus timezone.NS.name string at a late slot
+    """
+    objects: list = ["$null"]  # [0]
+
+    exception_dates = exception_dates or []
+    exdate_base = 11
+    exdate_uids = [plistlib.UID(exdate_base + i) for i in range(len(exception_dates))]
+
+    tz_name_slot = exdate_base + len(exception_dates)
+    has_tz = tz_name is not None
+
+    root = {
+        "title": plistlib.UID(2),
+        "calendarIdentifier": plistlib.UID(3),
+        "startDate": plistlib.UID(4),
+        "endDate": plistlib.UID(5),
+        "isAllDay": False,
+        "recurrenceRule": plistlib.UID(6) if recurrence_rule else plistlib.UID(0),
+        "recurrenceExceptionDates": plistlib.UID(7) if exception_dates else plistlib.UID(0),
+        "recurrenceOccurrenceDates": plistlib.UID(0),
+        "recurrenceEndDate": plistlib.UID(0),
+        "exchangeUID": plistlib.UID(8) if exchange_uid else plistlib.UID(0),
+        "isDetached": is_detached,
+        "recurrenceInstanceDate": plistlib.UID(9) if instance_date else plistlib.UID(0),
+        "timeZone": plistlib.UID(10) if has_tz else plistlib.UID(0),
+        "attendees": plistlib.UID(0),
+        "organizer": plistlib.UID(0),
+    }
+
+    # [1..10] primary slots
+    objects.append(root)  # [1]
+    objects.append(title)  # [2]
+    objects.append(calendar_id)  # [3]
+    objects.append({"NS.time": _datetime_to_nsdate(start)})  # [4]
+    objects.append({"NS.time": _datetime_to_nsdate(end)})  # [5]
+
+    if recurrence_rule:
+        objects.append(recurrence_rule)  # [6]
+    else:
+        objects.append("$null")
+
+    if exception_dates:
+        objects.append({"NS.objects": exdate_uids})  # [7]
+    else:
+        objects.append("$null")
+
+    objects.append(exchange_uid if exchange_uid else "$null")  # [8]
+    objects.append(
+        {"NS.time": _datetime_to_nsdate(instance_date)} if instance_date else "$null"
+    )  # [9]
+    objects.append(
+        {"NS.name": plistlib.UID(tz_name_slot)} if has_tz else "$null"
+    )  # [10]
+
+    # [11..] exception date entries
+    for dt in exception_dates:
+        objects.append({"NS.time": _datetime_to_nsdate(dt)})
+
+    # Timezone name string slot
+    if has_tz:
+        objects.append(tz_name)
+
+    plist = {
+        "$version": 100000,
+        "$archiver": "NSKeyedArchiver",
+        "$top": {"root": plistlib.UID(1)},
+        "$objects": objects,
+    }
+    return plistlib.dumps(plist, fmt=plistlib.FMT_BINARY)
+
+
+def _insert_rich(
+    conn: sqlite3.Connection,
+    rowid: int,
+    cal_id: str,
+    blob: bytes,
+    start: datetime,
+    recurrence_end: datetime | None,
+    recurring: int,
+    exchange_uid: str | None = None,
+) -> None:
+    """Insert an event with the exchangeUID column populated."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO database2 (rowid, collection, key, data) VALUES (?, ?, ?, ?)",
+        (rowid, f"calendarItems-{cal_id}", f"event-{rowid}", blob),
+    )
+    cur.execute(
+        "INSERT INTO secondaryIndex_index_calendarItems "
+        "(rowid, calendarIdentifier, startDate, recurrenceEndDate, "
+        "hidden, isAllDayOrFloating, recurring, exchangeUID) "
+        "VALUES (?, ?, ?, ?, NULL, 0, ?, ?)",
+        (
+            rowid,
+            cal_id,
+            _datetime_to_nsdate(start),
+            _datetime_to_nsdate(recurrence_end) if recurrence_end else None,
+            recurring,
+            exchange_uid,
+        ),
+    )
+    cur.execute(
+        "INSERT INTO fts_fts (rowid, title, location, notes, URL, attendees, attachments) "
+        "VALUES (?, '', '', '', '', '', '')",
+        (rowid,),
+    )
+    conn.commit()
+
+
+class TestRecurrenceExpansion:
+    """End-to-end tests for Phase 1 (rule expansion) and Phase 2 (detached dedup)."""
+
+    def _weekly_tuesday_rule(self) -> dict:
+        return {
+            "type": 2,  # weekly
+            "interval": 1,
+            "daysOfTheWeek": {
+                "NS.objects": [{"dayOfTheWeek": 3, "weekNumber": 0}]
+            },
+            "firstDayOfTheWeek": 2,
+            "occurrenceCount": 0,
+            "endDate": "$null",
+            "setPositions": "$null",
+            "daysOfTheMonth": "$null",
+            "daysOfTheYear": "$null",
+            "weeksOfTheYear": "$null",
+            "monthsOfTheYear": "$null",
+            "isEndDateAllDay": False,
+            "calendarIdentifier": "$null",
+        }
+
+    def test_weekly_master_expands_into_window(self, test_db):
+        """A weekly-Tuesday master should emit each Tuesday in the window."""
+        conn = sqlite3.connect(str(test_db))
+        # Anchor: Tue 2026-03-03 10:00 UTC.  Runs indefinitely.
+        anchor = datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc)
+        blob = _rich_event_blob(
+            title="Weekly Sync",
+            calendar_id="abc123",
+            start=anchor,
+            end=anchor + timedelta(minutes=30),
+            recurrence_rule=self._weekly_tuesday_rule(),
+            exchange_uid="UID-W",
+        )
+        _insert_rich(
+            conn, rowid=9001, cal_id="abc123", blob=blob,
+            start=anchor, recurrence_end=None, recurring=1, exchange_uid="UID-W",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                datetime(2026, 3, 1, tzinfo=timezone.utc),
+                datetime(2026, 3, 31, tzinfo=timezone.utc),
+            )
+        finally:
+            db.close()
+
+        occurrences = [e["start"] for e in events if e["title"] == "Weekly Sync"]
+        assert occurrences == [
+            datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 3, 17, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 3, 24, 10, 0, tzinfo=timezone.utc),
+        ]
+
+    def test_detached_sibling_suppresses_master_ghost(self, test_db):
+        """Phase 2: master must not emit on a date that a detached sibling has moved."""
+        conn = sqlite3.connect(str(test_db))
+        anchor = datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc)
+        master_blob = _rich_event_blob(
+            title="Weekly Sync",
+            calendar_id="abc123",
+            start=anchor,
+            end=anchor + timedelta(minutes=30),
+            recurrence_rule=self._weekly_tuesday_rule(),
+            exchange_uid="UID-W",
+            # Critical: Mar 10 is NOT in EXDATE even though it was moved.
+            exception_dates=[],
+        )
+        _insert_rich(
+            conn, rowid=9001, cal_id="abc123", blob=master_blob,
+            start=anchor, recurrence_end=None, recurring=1, exchange_uid="UID-W",
+        )
+
+        # Detached sibling: same exchangeUID, recurring=0, moved Mar 10 → Mar 12.
+        moved_start = datetime(2026, 3, 12, 14, 0, tzinfo=timezone.utc)
+        original = datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc)
+        sibling_blob = _rich_event_blob(
+            title="Weekly Sync (moved)",
+            calendar_id="abc123",
+            start=moved_start,
+            end=moved_start + timedelta(minutes=30),
+            exchange_uid="UID-W",
+            is_detached=True,
+            instance_date=original,
+        )
+        _insert_rich(
+            conn, rowid=9002, cal_id="abc123", blob=sibling_blob,
+            start=moved_start, recurrence_end=None, recurring=0, exchange_uid="UID-W",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                datetime(2026, 3, 1, tzinfo=timezone.utc),
+                datetime(2026, 3, 31, tzinfo=timezone.utc),
+            )
+        finally:
+            db.close()
+
+        pairs = sorted((e["start"], e["title"]) for e in events if e["title"].startswith("Weekly Sync"))
+        # Expected: Mar 3 master, Mar 12 moved sibling, Mar 17 master, Mar 24 master.
+        # NO ghost on Mar 10.
+        assert pairs == [
+            (datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+            (datetime(2026, 3, 12, 14, 0, tzinfo=timezone.utc), "Weekly Sync (moved)"),
+            (datetime(2026, 3, 17, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+            (datetime(2026, 3, 24, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+        ]
+
+    def test_timezone_aware_expansion(self, test_db):
+        """Phase 1 regression: 3rd-Thursday monthly rule evaluates in the event's TZ."""
+        conn = sqlite3.connect(str(test_db))
+        # 2025-10-15 23:10 UTC = 2025-10-16 09:40 Adelaide (ACDT, UTC+10:30), a Thu.
+        anchor = datetime(2025, 10, 15, 23, 10, tzinfo=timezone.utc)
+        rule = {
+            "type": 3,  # monthly
+            "interval": 1,
+            "daysOfTheWeek": {
+                "NS.objects": [{"dayOfTheWeek": 5, "weekNumber": 3}]  # 3rd Thu
+            },
+            "occurrenceCount": 12,
+            "endDate": "$null",
+            "setPositions": "$null",
+            "daysOfTheMonth": "$null",
+            "daysOfTheYear": "$null",
+            "weeksOfTheYear": "$null",
+            "monthsOfTheYear": "$null",
+            "firstDayOfTheWeek": 0,
+            "isEndDateAllDay": False,
+            "calendarIdentifier": "$null",
+        }
+        blob = _rich_event_blob(
+            title="TZ Meeting",
+            calendar_id="abc123",
+            start=anchor,
+            end=anchor + timedelta(minutes=45),
+            recurrence_rule=rule,
+            exchange_uid="UID-TZ",
+            tz_name="Australia/Adelaide",
+        )
+        _insert_rich(
+            conn, rowid=9100, cal_id="abc123", blob=blob,
+            start=anchor, recurrence_end=None, recurring=1, exchange_uid="UID-TZ",
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            # Adelaide local window for Thu 2026-04-16 (ACST, UTC+09:30).
+            events = db.get_events_in_range(
+                datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc),  # 00:00 ACST
+                datetime(2026, 4, 16, 14, 30, tzinfo=timezone.utc),  # 00:00 next day
+            )
+        finally:
+            db.close()
+
+        hits = [e for e in events if e["title"] == "TZ Meeting"]
+        assert len(hits) == 1
+        # Anchor local time 09:40 stays constant; April is ACST so UTC = 00:10.
+        assert hits[0]["start"] == datetime(2026, 4, 16, 0, 10, tzinfo=timezone.utc)

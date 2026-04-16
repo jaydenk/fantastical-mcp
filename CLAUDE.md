@@ -9,7 +9,8 @@
 | Module | Responsibility |
 |--------|---------------|
 | `src/fantastical_mcp/server.py` | FastMCP server entry point, 12 tool definitions, transport config |
-| `src/fantastical_mcp/db.py` | Read-only SQLite access to Fantastical's YapDatabase store. Three-tier read strategy: secondary index, FTS5, blob decode with FTS fallback. |
+| `src/fantastical_mcp/db.py` | Read-only SQLite access to Fantastical's YapDatabase store. Three-tier read strategy: secondary index, FTS5, blob decode with FTS fallback. Recurring series are expanded at query time. |
+| `src/fantastical_mcp/recurrence.py` | EKRecurrenceRule → dateutil.rrule expander. Handles timezone-aware expansion, EXDATE/RDATE, COUNT vs UNTIL, detached-occurrence dedup inputs. |
 | `src/fantastical_mcp/formatters.py` | Plain-text output formatters. Australian English throughout. UTC to local time conversion on display. |
 | `src/fantastical_mcp/url_scheme.py` | URL scheme helpers for event creation and date navigation |
 
