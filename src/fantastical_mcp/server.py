@@ -14,6 +14,7 @@ from .formatters import (
     format_events_by_calendar,
     format_events_by_date,
 )
+from .json_encoders import encode_event, encode_event_detail
 from .url_scheme import create_event_url, execute_url, show_date_url
 
 logging.basicConfig(level=logging.INFO)
@@ -241,6 +242,81 @@ async def create_event(
     if not add_immediately:
         msg += "\nFantastical is showing the event for confirmation."
     return msg
+
+
+@mcp.tool
+async def get_today_json() -> dict:
+    """Machine-readable variant of get_today.
+
+    Returns today's events as a structured dict so programmatic clients
+    (dashboards, automations) don't have to parse the pretty-printed text
+    output. Event times are ISO-8601 strings in the event's original
+    timezone.
+
+    Response shape::
+
+        {
+          "now": ISO-8601 string (current local time),
+          "timezone": IANA name (e.g. "Australia/Adelaide"),
+          "events": [{id, title, calendar, start, end, all_day,
+                      location, recurring, attendees_count}, ...]
+        }
+    """
+    db = _get_db()
+    now = datetime.now(timezone.utc)
+    start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    events = db.get_events_in_range(
+        start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    )
+    local_tz = now.astimezone().tzinfo
+    return {
+        "now": now.astimezone().isoformat(),
+        "timezone": str(local_tz) if local_tz else "",
+        "events": [encode_event(e) for e in events],
+    }
+
+
+@mcp.tool
+async def get_upcoming_json(days: int = 7) -> dict:
+    """Machine-readable variant of get_upcoming.
+
+    Args:
+        days: Number of days to look ahead (default 7).
+
+    Response shape mirrors get_today_json but covers the next *days* days.
+    """
+    days = min(days, MAX_DAYS)
+    db = _get_db()
+    now = datetime.now(timezone.utc)
+    start = now.astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=days)
+    events = db.get_events_in_range(
+        start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+    )
+    local_tz = now.astimezone().tzinfo
+    return {
+        "now": now.astimezone().isoformat(),
+        "timezone": str(local_tz) if local_tz else "",
+        "days": days,
+        "events": [encode_event(e) for e in events],
+    }
+
+
+@mcp.tool
+async def get_event_json(event_id: int) -> dict:
+    """Machine-readable variant of get_event. Returns None-valued fields
+    when a value is absent rather than omitting them, so clients can treat
+    the shape as stable.
+
+    Args:
+        event_id: The event rowid (as returned by get_today_json etc.).
+    """
+    db = _get_db()
+    event = db.get_event(event_id)
+    if not event:
+        return {"id": event_id, "found": False}
+    return {"found": True, **encode_event_detail(event)}
 
 
 @mcp.tool
