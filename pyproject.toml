@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fantastical-mcp"
-version = "0.1.3"
+version = "0.1.4"
 description = "Fantastical calendar MCP server — read events from Fantastical's local database, create via URL scheme"
 readme = "README.md"
 license = "MIT"

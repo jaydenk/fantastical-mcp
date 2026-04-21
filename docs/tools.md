@@ -1,6 +1,6 @@
 # Tool Reference
 
-fantastical-mcp exposes 12 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme).
+fantastical-mcp exposes 15 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme). Three read tools (`get_today_json`, `get_upcoming_json`, `get_event_json`) return structured JSON rather than pretty-printed text, for programmatic clients.
 
 ---
 
@@ -241,6 +241,87 @@ Monday 7 April 2026
 ```
 
 Results are ordered by recency (most recently added/synced first), not by event date.
+
+---
+
+## JSON Read Tools
+
+These tools return structured Python dicts (serialised as JSON by MCP) rather than pretty-printed text. Use them from dashboards, automations, or any programmatic client that would otherwise need to parse the human-readable output. Event times are ISO-8601 strings.
+
+### `get_today_json`
+
+Machine-readable variant of `get_today`.
+
+**Parameters:** None
+
+**Response shape:**
+
+```json
+{
+  "now": "2026-04-21T09:15:00+09:30",
+  "timezone": "Australia/Adelaide",
+  "events": [
+    {
+      "id": 42,
+      "title": "Team Standup",
+      "calendar": "Work",
+      "start": "2026-04-21T09:00:00+00:00",
+      "end": "2026-04-21T10:00:00+00:00",
+      "all_day": false,
+      "location": "Meeting Room A",
+      "recurring": true,
+      "attendees_count": 3
+    }
+  ]
+}
+```
+
+---
+
+### `get_upcoming_json`
+
+Machine-readable variant of `get_upcoming`. Response mirrors `get_today_json` with an additional `days` field echoing the requested window.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `days` | `int` | `7` | Number of days to look ahead (capped at 365) |
+
+---
+
+### `get_event_json`
+
+Machine-readable variant of `get_event`. Returns the same summary fields as `get_today_json`, plus `notes`, `organizer`, and the full `attendees` list. Absent values are returned as `null` so the shape stays stable for callers. If the event id is not found, the response is `{"id": <id>, "found": false}`.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `event_id` | `int` | *required* | The event rowid (as returned in the `id` field of `get_today_json` etc.) |
+
+**Response shape (found):**
+
+```json
+{
+  "found": true,
+  "id": 42,
+  "title": "Team Standup",
+  "calendar": "Work",
+  "start": "2026-04-21T09:00:00+00:00",
+  "end": "2026-04-21T10:00:00+00:00",
+  "all_day": false,
+  "location": "Meeting Room A",
+  "recurring": true,
+  "attendees_count": 2,
+  "notes": "Bring laptop",
+  "organizer": {"displayName": "Alice Smith", "emailAddress": "alice@example.com"},
+  "attendees": [
+    {"displayName": "Alice Smith", "emailAddress": "alice@example.com"},
+    {"displayName": "Bob Jones", "emailAddress": "bob@example.com"}
+  ]
+}
+```
 
 ---
 

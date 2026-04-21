@@ -115,6 +115,9 @@ See [docs/configuration.md](docs/configuration.md) for environment variables, ca
 | `get_recurring` | Upcoming recurring events, optionally filtered by calendar |
 | `get_invitations` | Pending event invitations that need a response |
 | `get_recent` | Most recently added or synced events |
+| `get_today_json` | Structured JSON variant of `get_today` for programmatic clients |
+| `get_upcoming_json` | Structured JSON variant of `get_upcoming` |
+| `get_event_json` | Structured JSON variant of `get_event` |
 | `create_event` | Create an event using natural language |
 | `show_date` | Open Fantastical's mini calendar to a date |
 
