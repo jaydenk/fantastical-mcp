@@ -19,17 +19,17 @@ from fantastical_mcp.formatters import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Determine the local timezone offset so that test times are always expressed
-# as UTC instants that correspond to predictable local-clock values.  This
-# avoids failures when the machine's timezone differs from the author's
-# expectations.
-_LOCAL_TZ = datetime.now().astimezone().tzinfo
-
-
 def _local_to_utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> datetime:
-    """Create a UTC datetime from local-clock year/month/day/hour/minute."""
-    local = datetime(year, month, day, hour, minute, 0, tzinfo=_LOCAL_TZ)
-    return local.astimezone(timezone.utc)
+    """Create a UTC datetime from local-clock year/month/day/hour/minute.
+
+    A naive ``datetime`` is presumed by ``astimezone`` to be in the system
+    timezone, so the correct DST-aware offset *for that specific date* is
+    applied — mirroring the formatters' own ``.astimezone()`` display
+    conversion.  Capturing a single fixed offset (e.g. from
+    ``datetime.now().astimezone().tzinfo``) instead would break on dates that
+    fall on the other side of a daylight-saving changeover from "today".
+    """
+    return datetime(year, month, day, hour, minute, 0).astimezone(timezone.utc)
 
 
 def _make_event(
