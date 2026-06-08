@@ -1571,11 +1571,8 @@ class TestGetEventsInRangeCalendarScoping:
         Returns the (start_utc, end_utc) of the seeded events.
         """
         conn = sqlite3.connect(str(db_path))
-        noon_local = datetime.now(tz=_LOCAL_TZ).replace(
-            hour=12, minute=0, second=0, microsecond=0
-        )
-        start = noon_local.astimezone(timezone.utc)
-        end = (noon_local + timedelta(hours=1)).astimezone(timezone.utc)
+        start = datetime(2027, 6, 15, 2, 0, tzinfo=timezone.utc)
+        end = start + timedelta(hours=1)
         for rowid, cal_id, title in [
             (400, "abc123", "Work Shift"),
             (401, "def456", "Personal Lunch"),
@@ -1600,8 +1597,7 @@ class TestGetEventsInRangeCalendarScoping:
                 calendar_name="Work",
             )
             titles = [e["title"] for e in events]
-            assert "Work Shift" in titles
-            assert "Personal Lunch" not in titles
+            assert titles == ["Work Shift"]
         finally:
             db.close()
 
@@ -1613,8 +1609,7 @@ class TestGetEventsInRangeCalendarScoping:
                 start - timedelta(hours=1), end + timedelta(hours=1)
             )
             titles = [e["title"] for e in events]
-            assert "Work Shift" in titles
-            assert "Personal Lunch" in titles
+            assert set(titles) == {"Work Shift", "Personal Lunch"}
         finally:
             db.close()
 
