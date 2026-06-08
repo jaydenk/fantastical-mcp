@@ -39,6 +39,77 @@ def _get_db() -> FantasticalDB:
     return _db
 
 
+def _resolve_range_window(
+    start: str | None,
+    end: str | None,
+    days_back: int | None,
+    now: datetime,
+) -> tuple[datetime, datetime] | str:
+    """Resolve absolute/relative range arguments to a UTC ``(start, end)`` window.
+
+    Exactly one mode must be used:
+
+    * Absolute — ``start`` and ``end`` as ``"YYYY-MM-DD"``. ``end`` is inclusive
+      of the whole day (the window extends to local midnight after ``end``).
+    * Relative — ``days_back`` (positive int): from local midnight ``days_back``
+      days ago through the end of today.
+
+    Returns a ``(window_start_utc, window_end_utc)`` tuple, or an error/usage
+    string when the arguments are ambiguous or invalid. ``now`` must be a
+    timezone-aware datetime (injected so the relative window is testable).
+    """
+    has_absolute = start is not None or end is not None
+    has_relative = days_back is not None
+
+    if has_absolute and has_relative:
+        return (
+            "Use either absolute dates (start, end) or a relative window "
+            "(days_back), not both."
+        )
+
+    if has_absolute:
+        if start is None or end is None:
+            return "Absolute mode needs both start and end in YYYY-MM-DD format."
+        try:
+            start_naive = datetime.strptime(start, "%Y-%m-%d")
+        except ValueError:
+            return f"Invalid date format: {start}. Use YYYY-MM-DD."
+        try:
+            end_naive = datetime.strptime(end, "%Y-%m-%d")
+        except ValueError:
+            return f"Invalid date format: {end}. Use YYYY-MM-DD."
+        if end_naive < start_naive:
+            return f"end ({end}) is before start ({start})."
+        # Treat the parsed dates as local-clock midnights (matches get_availability).
+        local_start = start_naive.astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        local_end = (end_naive + timedelta(days=1)).astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    elif has_relative:
+        if days_back <= 0:
+            return "days_back must be a positive integer."
+        local_today = now.astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        local_start = local_today - timedelta(days=days_back)
+        local_end = local_today + timedelta(days=1)
+    else:
+        return (
+            "Specify either absolute dates (start and end, YYYY-MM-DD) or a "
+            "relative window (days_back)."
+        )
+
+    if (local_end - local_start).days > MAX_DAYS:
+        return f"Range too large (max {MAX_DAYS} days)."
+
+    return (
+        local_start.astimezone(timezone.utc),
+        local_end.astimezone(timezone.utc),
+    )
+
+
 @mcp.tool
 async def get_today() -> str:
     """Get all calendar events for today, grouped by calendar."""
