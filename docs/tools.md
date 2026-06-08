@@ -144,6 +144,45 @@ Friday 4 April 2026
 
 ---
 
+### `get_events_in_range`
+
+Get events in an arbitrary date window (past or future), grouped by date. Optionally scoped to a single calendar.
+
+Two mutually exclusive modes:
+
+- **Absolute** — provide `start` and `end` as `YYYY-MM-DD`. The end date is inclusive of the whole day.
+- **Relative** — provide `days_back` (positive integer): returns events from N days ago through the end of today.
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `calendar` | `str` | `None` (all calendars) | Optional calendar name to filter by. Note: an event mirrored across multiple calendars will appear once per calendar — scope to one calendar for a clean list. Use `get_calendars` to see available names. |
+| `start` | `str` | `None` | Start of the window in `YYYY-MM-DD` format (absolute mode). Required if using absolute mode. |
+| `end` | `str` | `None` | End of the window in `YYYY-MM-DD` format, inclusive (absolute mode). Required if using absolute mode. |
+| `days_back` | `int` | `None` | Number of days before today to look back (relative mode). Returns events from N days ago through end of today. |
+
+**Example:**
+
+```python
+get_events_in_range(calendar="Revl Coaching Shifts", start="2026-05-28", end="2026-06-10")
+```
+
+**Example output:**
+
+```
+Wednesday 28 May 2026
+  17:00 -- 21:00  Coaching Shift @ Revl (id:4201)
+
+Saturday 31 May 2026
+  09:00 -- 13:00  Coaching Shift @ Revl (id:4205)
+
+Tuesday 10 June 2026
+  17:00 -- 21:00  Coaching Shift @ Revl (id:4218)
+```
+
+---
+
 ### `get_availability`
 
 Show free/busy time slots for a specific date. Calculates gaps between events within the 08:00--18:00 working window (local time). All-day events are listed separately.
