@@ -241,11 +241,11 @@ async def get_events_in_range(
     events = db.get_events_in_range(win_start, win_end, calendar_name=calendar)
     if not events:
         scope = f"'{calendar}'" if calendar else "any calendar"
-        where = (
-            f"in the last {days_back} days"
-            if days_back is not None
-            else f"from {start} to {end}"
-        )
+        if days_back is not None:
+            unit = "day" if days_back == 1 else "days"
+            where = f"in the last {days_back} {unit}"
+        else:
+            where = f"from {start} to {end}"
         hint = (
             " (If unexpected, check the name with get_calendars.)"
             if calendar

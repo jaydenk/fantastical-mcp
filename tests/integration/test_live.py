@@ -69,7 +69,8 @@ class TestLiveDatabase:
         from fantastical_mcp.server import _resolve_range_window
 
         calendars = self.db.get_calendars()
-        assert len(calendars) > 0
+        if not calendars:
+            pytest.skip("No calendars available")
         name = calendars[0]["name"]
 
         window = _resolve_range_window(None, None, 30, datetime.now(timezone.utc))
