@@ -1555,3 +1555,77 @@ class TestRecurrenceExpansion:
         assert len(hits) == 1
         # Anchor local time 09:40 stays constant; April is ACST so UTC = 00:10.
         assert hits[0]["start"] == datetime(2026, 4, 16, 0, 10, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Calendar scoping tests for get_events_in_range
+# ---------------------------------------------------------------------------
+
+
+class TestGetEventsInRangeCalendarScoping:
+    """Verify the optional calendar_name parameter on get_events_in_range."""
+
+    def _seed_two_calendars(self, db_path):
+        """Seed one timed event on 'Work' (abc123) and one on 'Personal' (def456).
+
+        Returns the (start_utc, end_utc) of the seeded events.
+        """
+        conn = sqlite3.connect(str(db_path))
+        noon_local = datetime.now(tz=_LOCAL_TZ).replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
+        start = noon_local.astimezone(timezone.utc)
+        end = (noon_local + timedelta(hours=1)).astimezone(timezone.utc)
+        for rowid, cal_id, title in [
+            (400, "abc123", "Work Shift"),
+            (401, "def456", "Personal Lunch"),
+        ]:
+            blob = _create_event_blob(
+                title=title, calendar_id=cal_id, start=start, end=end
+            )
+            _insert_event(
+                conn, rowid=rowid, cal_id=cal_id, blob=blob,
+                start=start, end=end, title=title,
+            )
+        conn.commit()
+        conn.close()
+        return start, end
+
+    def test_scopes_to_named_calendar(self, test_db):
+        start, end = self._seed_two_calendars(test_db)
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                start - timedelta(hours=1), end + timedelta(hours=1),
+                calendar_name="Work",
+            )
+            titles = [e["title"] for e in events]
+            assert "Work Shift" in titles
+            assert "Personal Lunch" not in titles
+        finally:
+            db.close()
+
+    def test_all_calendars_when_name_omitted(self, test_db):
+        start, end = self._seed_two_calendars(test_db)
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                start - timedelta(hours=1), end + timedelta(hours=1)
+            )
+            titles = [e["title"] for e in events]
+            assert "Work Shift" in titles
+            assert "Personal Lunch" in titles
+        finally:
+            db.close()
+
+    def test_unknown_calendar_returns_empty(self, test_db):
+        start, end = self._seed_two_calendars(test_db)
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                start - timedelta(hours=1), end + timedelta(hours=1),
+                calendar_name="Nonexistent",
+            )
+            assert events == []
+        finally:
+            db.close()
