@@ -57,6 +57,9 @@ def _resolve_range_window(
     Returns a ``(window_start_utc, window_end_utc)`` tuple, or an error/usage
     string when the arguments are ambiguous or invalid. ``now`` must be a
     timezone-aware datetime (injected so the relative window is testable).
+
+    The size guard counts calendar days directly (not the UTC duration) so a
+    DST transition inside the window cannot shift the limit by a day.
     """
     has_absolute = start is not None or end is not None
     has_relative = days_back is not None
@@ -87,6 +90,7 @@ def _resolve_range_window(
         local_end = (end_naive + timedelta(days=1)).astimezone().replace(
             hour=0, minute=0, second=0, microsecond=0
         )
+        span_days = (end_naive - start_naive).days + 1  # inclusive of the end day
     elif has_relative:
         if days_back <= 0:
             return "days_back must be a positive integer."
@@ -95,13 +99,14 @@ def _resolve_range_window(
         )
         local_start = local_today - timedelta(days=days_back)
         local_end = local_today + timedelta(days=1)
+        span_days = days_back + 1  # days_back days plus today
     else:
         return (
             "Specify either absolute dates (start and end, YYYY-MM-DD) or a "
             "relative window (days_back)."
         )
 
-    if (local_end - local_start).days > MAX_DAYS:
+    if span_days > MAX_DAYS:
         return f"Range too large (max {MAX_DAYS} days)."
 
     return (

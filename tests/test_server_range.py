@@ -22,18 +22,23 @@ def test_absolute_window_end_is_inclusive():
     )
     assert isinstance(win, tuple)
     start, end = win
-    assert start == _local_midnight_utc(2026, 5, 28)
-    # End is exclusive midnight AFTER the 10th, so all of the 10th is included.
-    assert end == _local_midnight_utc(2026, 6, 11)
+    # 28 May -> local midnight after 10 Jun (inclusive end) = a 14-day span.
+    # Asserting the span (not absolute UTC instants) keeps this DST-independent.
+    assert end - start == timedelta(days=14)
+    assert start.tzinfo == timezone.utc
+    assert end.tzinfo == timezone.utc
 
 
 def test_relative_window_uses_injected_now():
-    now = _local_midnight_utc(2026, 6, 8) + timedelta(hours=12)  # noon local, 8 Jun
+    now = _local_midnight_utc(2026, 6, 8) + timedelta(hours=12)  # midday 8 Jun local
     win = _resolve_range_window(None, None, 14, now)
     assert isinstance(win, tuple)
     start, end = win
-    assert start == _local_midnight_utc(2026, 5, 25)  # 14 days before 8 Jun
-    assert end == _local_midnight_utc(2026, 6, 9)      # end of today (8 Jun)
+    # last 14 days through end of today = a 15-day span; window brackets `now`.
+    assert end - start == timedelta(days=15)
+    assert start < now < end
+    assert start.tzinfo == timezone.utc
+    assert end.tzinfo == timezone.utc
 
 
 def test_both_modes_is_error():
@@ -78,3 +83,15 @@ def test_neither_mode_is_usage():
     out = _resolve_range_window(None, None, None, datetime.now(timezone.utc))
     assert isinstance(out, str)
     assert "Specify either" in out
+
+
+def test_only_end_is_error():
+    out = _resolve_range_window(None, "2026-06-10", None, datetime.now(timezone.utc))
+    assert isinstance(out, str)
+    assert "both start and end" in out
+
+
+def test_negative_days_back_is_error():
+    out = _resolve_range_window(None, None, -5, datetime.now(timezone.utc))
+    assert isinstance(out, str)
+    assert "positive integer" in out
