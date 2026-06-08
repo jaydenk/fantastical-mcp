@@ -501,7 +501,7 @@ class FantasticalDB:
         return result
 
     def get_events_in_range(
-        self, start: datetime, end: datetime
+        self, start: datetime, end: datetime, calendar_name: str | None = None
     ) -> list[dict]:
         """Return decoded events occurring within *[start, end)*.
 
@@ -512,10 +512,24 @@ class FantasticalDB:
         edited occurrences) come through the non-recurring path with their
         new ``startDate``.
 
+        When ``calendar_name`` is given, results are scoped to that calendar
+        (resolved to its identifier(s) via the registry); an unknown name
+        yields an empty list.  When ``None`` (default), all non-excluded
+        calendars are queried — the original behaviour.
+
         Events from excluded calendars and hidden events are omitted.
         Results are ordered by start date ascending.
         """
-        return self._collect_occurrences(start, end, calendar_ids=None)
+        calendar_ids: list[str] | None = None
+        if calendar_name is not None:
+            calendar_ids = [
+                cid
+                for cid, name in self._cal_registry.items()
+                if name == calendar_name
+            ]
+            if not calendar_ids:
+                return []
+        return self._collect_occurrences(start, end, calendar_ids=calendar_ids)
 
     def _collect_occurrences(
         self,
