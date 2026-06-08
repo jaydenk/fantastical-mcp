@@ -111,6 +111,7 @@ See [docs/configuration.md](docs/configuration.md) for environment variables, ca
 | `get_event` | Full details for a specific event by ID |
 | `search_events` | Full-text search across titles, locations, notes, attendees |
 | `get_events_by_calendar` | Events from a specific calendar |
+| `get_events_in_range` | Events in an arbitrary date window (past or future), optionally scoped to one calendar |
 | `get_availability` | Free/busy time slots for a date |
 | `get_recurring` | Upcoming recurring events, optionally filtered by calendar |
 | `get_invitations` | Pending event invitations that need a response |
