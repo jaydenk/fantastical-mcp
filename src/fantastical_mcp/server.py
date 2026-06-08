@@ -99,7 +99,9 @@ def _resolve_range_window(
         )
         local_start = local_today - timedelta(days=days_back)
         local_end = local_today + timedelta(days=1)
-        span_days = days_back + 1  # days_back days plus today
+        # The cap applies to the requested look-back, so days_back == MAX_DAYS
+        # (a full year) is allowed even though the window also includes today.
+        span_days = days_back
     else:
         return (
             "Specify either absolute dates (start and end, YYYY-MM-DD) or a "

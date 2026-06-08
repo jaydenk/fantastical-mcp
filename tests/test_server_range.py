@@ -95,3 +95,14 @@ def test_negative_days_back_is_error():
     out = _resolve_range_window(None, None, -5, datetime.now(timezone.utc))
     assert isinstance(out, str)
     assert "positive integer" in out
+
+
+def test_days_back_at_max_is_allowed():
+    win = _resolve_range_window(None, None, 365, datetime.now(timezone.utc))
+    assert isinstance(win, tuple)
+
+
+def test_days_back_over_max_is_error():
+    out = _resolve_range_window(None, None, 366, datetime.now(timezone.utc))
+    assert isinstance(out, str)
+    assert "Range too large" in out
