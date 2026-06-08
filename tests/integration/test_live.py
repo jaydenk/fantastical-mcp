@@ -62,3 +62,22 @@ class TestLiveDatabase:
             pytest.skip("No calendars found")
         events = self.db.get_events_by_calendar(calendars[0]["name"], days=30)
         assert isinstance(events, list)
+
+    def test_get_events_in_range_scopes_to_calendar(self):
+        from datetime import datetime, timezone
+
+        from fantastical_mcp.server import _resolve_range_window
+
+        calendars = self.db.get_calendars()
+        assert len(calendars) > 0
+        name = calendars[0]["name"]
+
+        window = _resolve_range_window(None, None, 30, datetime.now(timezone.utc))
+        assert isinstance(window, tuple)
+        start, end = window
+
+        events = self.db.get_events_in_range(start, end, calendar_name=name)
+        assert isinstance(events, list)
+        # Scoping guarantee: every returned event belongs to the named calendar.
+        for e in events:
+            assert e["calendar"] == name
