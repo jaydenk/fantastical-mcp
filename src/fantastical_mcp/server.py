@@ -206,6 +206,56 @@ async def get_events_by_calendar(calendar: str, days: int = 30) -> str:
 
 
 @mcp.tool
+async def get_events_in_range(
+    calendar: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    days_back: int | None = None,
+) -> str:
+    """Get events in an arbitrary date window (past or future), grouped by date.
+
+    Specify the window in exactly ONE of two ways (not both):
+
+    * Absolute: pass both `start` and `end` as "YYYY-MM-DD". `end` is
+      inclusive of the whole day (e.g. start="2026-05-28", end="2026-06-10"
+      covers all of the 10th).
+    * Relative: pass `days_back` (a positive integer) for events from that
+      many days ago through the end of today.
+
+    Args:
+        calendar: Optional calendar name to scope to (use get_calendars for
+            names). Omit to query all calendars — note that an event mirrored
+            across several calendars then appears once per calendar; scope to
+            a single calendar to get a clean, duplicate-free list.
+        start: Absolute-mode start date, "YYYY-MM-DD".
+        end: Absolute-mode end date, "YYYY-MM-DD" (inclusive).
+        days_back: Relative-mode window size in days.
+    """
+    now = datetime.now(timezone.utc)
+    window = _resolve_range_window(start, end, days_back, now)
+    if isinstance(window, str):
+        return window
+    win_start, win_end = window
+
+    db = _get_db()
+    events = db.get_events_in_range(win_start, win_end, calendar_name=calendar)
+    if not events:
+        scope = f"'{calendar}'" if calendar else "any calendar"
+        where = (
+            f"in the last {days_back} days"
+            if days_back is not None
+            else f"from {start} to {end}"
+        )
+        hint = (
+            " (If unexpected, check the name with get_calendars.)"
+            if calendar
+            else ""
+        )
+        return f"No events in {scope} {where}.{hint}"
+    return format_events_by_date(events)
+
+
+@mcp.tool
 async def get_availability(date: str, calendars: list[str] | None = None) -> str:
     """Show free/busy time slots for a specific date.
 
