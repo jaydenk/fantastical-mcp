@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "fantastical-mcp",
-  "version": "0.1.0",
-  "description": "Read and create Fantastical calendar events. Queries events by date, calendar, or search. Creates events via natural language. No API keys or TCC permissions needed.",
+  "version": "0.1.5",
+  "description": "Read and create Fantastical calendar events. Queries events by date, calendar, range, or search. Creates events via natural language. No API keys or TCC permissions needed.",
   "author": {
     "name": "Jayden Kerr"
   },
@@ -32,6 +32,10 @@
       "description": "Get events from a specific calendar"
     },
     {
+      "name": "get_events_in_range",
+      "description": "Get events in an arbitrary date window (past or future), optionally scoped to one calendar"
+    },
+    {
       "name": "get_availability",
       "description": "Show free/busy time slots for a date"
     },
@@ -52,8 +56,20 @@
       "description": "Create an event using natural language"
     },
     {
+      "name": "get_today_json",
+      "description": "Structured JSON variant of get_today for programmatic clients"
+    },
+    {
+      "name": "get_upcoming_json",
+      "description": "Structured JSON variant of get_upcoming"
+    },
+    {
+      "name": "get_event_json",
+      "description": "Structured JSON variant of get_event"
+    },
+    {
       "name": "show_date",
-      "description": "Open Fantastical to a specific date"
+      "description": "Open Fantastical's mini calendar to a date"
     }
   ],
   "server": {
