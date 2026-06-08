@@ -1,6 +1,6 @@
 # Tool Reference
 
-fantastical-mcp exposes 15 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme). Three read tools (`get_today_json`, `get_upcoming_json`, `get_event_json`) return structured JSON rather than pretty-printed text, for programmatic clients.
+fantastical-mcp exposes 16 tools via the Model Context Protocol. They are grouped into read tools (which query Fantastical's local database) and write tools (which use Fantastical's URL scheme). Three read tools (`get_today_json`, `get_upcoming_json`, `get_event_json`) return structured JSON rather than pretty-printed text, for programmatic clients.
 
 ---
 
