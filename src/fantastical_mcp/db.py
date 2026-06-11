@@ -615,6 +615,27 @@ class FantasticalDB:
         )
         return results
 
+    @staticmethod
+    def _exchange_series_key(exchange_uid: str | None) -> str | None:
+        """Series identity for an Exchange ``GlobalObjectId``, ignoring the
+        per-occurrence recurrence-id.
+
+        An Exchange GOID is a hex string whose bytes 16–19 (hex chars 32:40)
+        hold the "exception replacement time": ``00000000`` on the recurring
+        master, but the *original* occurrence date on every detached/edited
+        instance (e.g. ``07EA060B`` = 2026-06-11). Everything else — most
+        importantly the trailing per-series Data GUID — is identical across a
+        master and all its exceptions. Zeroing those 4 bytes therefore yields
+        the ``CleanGlobalObjectId``, which is the same for the whole series and
+        is the correct key for matching a master to its moved occurrences.
+
+        Returns ``None`` for missing or too-short values (synthetic/non-GOID
+        uids), so callers can fall back to exact-equality matching.
+        """
+        if not exchange_uid or len(exchange_uid) < 40:
+            return None
+        return exchange_uid[:32] + "00000000" + exchange_uid[40:]
+
     def _detached_instance_dates(self, master: dict) -> list[datetime]:
         """Return the original-occurrence dates of every detached sibling.
 
@@ -627,9 +648,18 @@ class FantasticalDB:
         — but not always (observed: moved occurrences on Exchange calendars
         with EXDATE left empty).
 
-        Siblings are linked by shared ``exchangeUID``.  We scan the
-        secondary index (which stores ``exchangeUID`` as a column) and
-        decode only matching rows — much cheaper than reading every blob.
+        Siblings share a series identity, but on **Exchange/Outlook**
+        calendars they do NOT share a raw ``exchangeUID``: Exchange encodes
+        each detached occurrence's original date into bytes 16–19 of the
+        ``GlobalObjectId``, so a moved instance's ``exchangeUID`` differs from
+        its master's. Matching on exact equality therefore silently misses the
+        sibling and the master emits a duplicate "ghost" at the original time.
+        We instead match on the ``CleanGlobalObjectId`` (the GOID with the
+        recurrence-id bytes zeroed) — the trailing Data GUID is shared across
+        the whole series. The cheap secondary-index ``substr`` on the shared
+        tail narrows candidates; a normalised-equality check then confirms the
+        series before any blob is decoded.
+
         Returns an empty list if the master lacks an ``exchangeUID``
         (typical for some local/CalDAV calendars), since we have no
         reliable way to find siblings in that case; those calendars tend
@@ -639,20 +669,44 @@ class FantasticalDB:
         if not exchange_uid:
             return []
 
+        series_key = self._exchange_series_key(exchange_uid)
         cur = self._conn.cursor()
-        cur.execute(
-            "SELECT d.rowid, d.data "
-            "FROM database2 d "
-            "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
-            "WHERE si.exchangeUID = ? "
-            "AND (si.recurring IS NULL OR si.recurring = 0) "
-            "AND (si.hidden IS NULL OR si.hidden = 0) "
-            "AND d.rowid != ?",
-            (exchange_uid, master["rowid"]),
-        )
+        if series_key is not None:
+            # Match on the shared trailing Data GUID (bytes 20+, hex chars 40+)
+            # so detached siblings with a different recurrence-id field are
+            # found. The constant 16-byte prefix is NOT series-identifying, so
+            # the tail is the discriminator; a normalised check below rejects
+            # any incidental tail collision.
+            cur.execute(
+                "SELECT d.rowid, d.data, si.exchangeUID "
+                "FROM database2 d "
+                "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+                "WHERE substr(si.exchangeUID, 41) = ? "
+                "AND (si.recurring IS NULL OR si.recurring = 0) "
+                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                "AND d.rowid != ?",
+                (exchange_uid[40:], master["rowid"]),
+            )
+        else:
+            # Synthetic / non-GOID uid — fall back to exact-equality matching.
+            cur.execute(
+                "SELECT d.rowid, d.data, si.exchangeUID "
+                "FROM database2 d "
+                "JOIN secondaryIndex_index_calendarItems si ON d.rowid = si.rowid "
+                "WHERE si.exchangeUID = ? "
+                "AND (si.recurring IS NULL OR si.recurring = 0) "
+                "AND (si.hidden IS NULL OR si.hidden = 0) "
+                "AND d.rowid != ?",
+                (exchange_uid, master["rowid"]),
+            )
 
         dates: list[datetime] = []
         for row in cur.fetchall():
+            if (
+                series_key is not None
+                and self._exchange_series_key(row["exchangeUID"]) != series_key
+            ):
+                continue  # tail collision across distinct series — skip
             sibling = self.decode_event(row["data"], row["rowid"])
             if sibling is None:
                 continue
