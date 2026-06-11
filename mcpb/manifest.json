@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "fantastical-mcp",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Read and create Fantastical calendar events. Queries events by date, calendar, range, or search. Creates events via natural language. No API keys or TCC permissions needed.",
   "author": {
     "name": "Jayden Kerr"

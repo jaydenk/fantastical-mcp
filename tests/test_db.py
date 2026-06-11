@@ -1504,6 +1504,82 @@ class TestRecurrenceExpansion:
             (datetime(2026, 3, 24, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
         ]
 
+    def test_detached_sibling_with_exchange_recurrence_id_suppresses_ghost(self, test_db):
+        """Phase 2 regression: Exchange gives a moved occurrence a DIFFERENT
+        exchangeUID than its master (the original date is encoded into bytes
+        16–19 of the GlobalObjectId), so exact-equality sibling matching misses
+        it and the master emits a ghost. Siblings must be matched by their
+        CleanGlobalObjectId (the shared trailing Data GUID) instead.
+
+        Reproduces the live "Monthly Operations Meeting - Ryan" duplicate:
+        a recurring master plus a rescheduled instance, differing only in the
+        4-byte recurrence-id field of the Exchange GOID.
+        """
+        # Standard 16-byte Exchange Byte-Array ID + a per-series trailing Data
+        # GUID. Master zeroes the recurrence-id field; the sibling encodes the
+        # original date (2026-03-10 → year 0x07EA, month 0x03, day 0x0A).
+        prefix = "040000008200E00074C5B7101A82E008"
+        tail = "48730278A02EDC010000000000000000100000009817799FABC04D4AB16DF771C13A9DB9"
+        master_uid = prefix + "00000000" + tail
+        sibling_uid = prefix + "07EA030A" + tail
+        assert master_uid != sibling_uid  # the whole point — they are not equal
+
+        conn = sqlite3.connect(str(test_db))
+        anchor = datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc)
+        master_blob = _rich_event_blob(
+            title="Weekly Sync",
+            calendar_id="abc123",
+            start=anchor,
+            end=anchor + timedelta(minutes=30),
+            recurrence_rule=self._weekly_tuesday_rule(),
+            exchange_uid=master_uid,
+            # Mar 10 deliberately NOT in EXDATE — only sibling-dedup can suppress it.
+            exception_dates=[],
+        )
+        _insert_rich(
+            conn, rowid=9101, cal_id="abc123", blob=master_blob,
+            start=anchor, recurrence_end=None, recurring=1, exchange_uid=master_uid,
+        )
+
+        # Detached sibling: DIFFERENT exchangeUID, recurring=0, moved Mar 10 → Mar 12.
+        moved_start = datetime(2026, 3, 12, 14, 0, tzinfo=timezone.utc)
+        original = datetime(2026, 3, 10, 10, 0, tzinfo=timezone.utc)
+        sibling_blob = _rich_event_blob(
+            title="Weekly Sync (moved)",
+            calendar_id="abc123",
+            start=moved_start,
+            end=moved_start + timedelta(minutes=30),
+            exchange_uid=sibling_uid,
+            is_detached=True,
+            instance_date=original,
+        )
+        _insert_rich(
+            conn, rowid=9102, cal_id="abc123", blob=sibling_blob,
+            start=moved_start, recurrence_end=None, recurring=0, exchange_uid=sibling_uid,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            events = db.get_events_in_range(
+                datetime(2026, 3, 1, tzinfo=timezone.utc),
+                datetime(2026, 3, 31, tzinfo=timezone.utc),
+            )
+        finally:
+            db.close()
+
+        pairs = sorted(
+            (e["start"], e["title"]) for e in events if e["title"].startswith("Weekly Sync")
+        )
+        # NO ghost on Mar 10 — the master must skip it because a detached
+        # sibling of the same series moved that occurrence.
+        assert pairs == [
+            (datetime(2026, 3, 3, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+            (datetime(2026, 3, 12, 14, 0, tzinfo=timezone.utc), "Weekly Sync (moved)"),
+            (datetime(2026, 3, 17, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+            (datetime(2026, 3, 24, 10, 0, tzinfo=timezone.utc), "Weekly Sync"),
+        ]
+
     def test_timezone_aware_expansion(self, test_db):
         """Phase 1 regression: 3rd-Thursday monthly rule evaluates in the event's TZ."""
         conn = sqlite3.connect(str(test_db))
