@@ -25,7 +25,6 @@ fantastical-mcp/
   pyproject.toml         # Build config (hatchling), dependencies, scripts
   env.example            # Example environment variables
   LICENSE                # MIT licence
-  CLAUDE.md              # Claude Code working context
 ```
 
 ### Module responsibilities
