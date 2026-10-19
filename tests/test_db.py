@@ -1263,6 +1263,7 @@ def _rich_event_blob(
     is_detached: bool = False,
     instance_date: datetime | None = None,
     tz_name: str | None = None,
+    is_all_day: bool = False,
 ) -> bytes:
     """Build a keyed-archive blob with the fields Phase 1/2 rely on.
 
@@ -1297,7 +1298,7 @@ def _rich_event_blob(
         "calendarIdentifier": plistlib.UID(3),
         "startDate": plistlib.UID(4),
         "endDate": plistlib.UID(5),
-        "isAllDay": False,
+        "isAllDay": is_all_day,
         "recurrenceRule": plistlib.UID(6) if recurrence_rule else plistlib.UID(0),
         "recurrenceExceptionDates": plistlib.UID(7) if exception_dates else plistlib.UID(0),
         "recurrenceOccurrenceDates": plistlib.UID(0),
@@ -1700,3 +1701,118 @@ class TestGetEventsInRangeCalendarScoping:
             assert events == []
         finally:
             db.close()
+
+
+# ---------------------------------------------------------------------------
+# All-day events (stored as UTC midnight, displayed on their local date)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def chicago_tz(monkeypatch):
+    """Run the test with the process timezone set to America/Chicago (UTC-5/6).
+
+    All-day bugs only show up west of UTC, where UTC midnight is the
+    previous local evening.
+    """
+    import time
+
+    monkeypatch.setenv("TZ", "America/Chicago")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def _local_day(year: int, month: int, day: int) -> tuple[datetime, datetime]:
+    start = datetime(year, month, day).astimezone()
+    return start, (datetime(year, month, day) + timedelta(days=1)).astimezone()
+
+
+class TestAllDayEvents:
+    def test_float_all_day_keeps_calendar_date(self, chicago_tz):
+        from fantastical_mcp.db import float_all_day
+
+        event = {
+            "is_all_day": True,
+            "start": datetime(2026, 10, 27, tzinfo=timezone.utc),
+            "end": datetime(2026, 10, 28, tzinfo=timezone.utc),
+        }
+        floated = float_all_day(event)
+        assert floated["start"].date().isoformat() == "2026-10-27"
+        assert floated["start"].hour == 0
+        assert floated["start"].utcoffset() == timedelta(hours=-5)
+        assert floated["end"].date().isoformat() == "2026-10-28"
+
+    def test_float_all_day_leaves_timed_events(self):
+        from fantastical_mcp.db import float_all_day
+
+        event = {"is_all_day": False, "start": datetime(2026, 10, 27, tzinfo=timezone.utc)}
+        assert float_all_day(event) is event
+
+    def test_all_day_event_on_its_local_date(self, test_db, chicago_tz):
+        """An all-day event on Oct 31 is returned for Oct 31, not Oct 30."""
+        start = datetime(2026, 10, 31, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        conn = sqlite3.connect(str(test_db))
+        blob = _create_event_blob(
+            title="Halloween", calendar_id="abc123", start=start, end=end,
+            is_all_day=True,
+        )
+        _insert_event(
+            conn, rowid=400, cal_id="abc123", blob=blob, start=start, end=end,
+            title="Halloween", is_all_day=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            day_before = db.get_events_in_range(*_local_day(2026, 10, 30))
+            day_of = db.get_events_in_range(*_local_day(2026, 10, 31))
+        finally:
+            db.close()
+
+        assert [e["title"] for e in day_before] == []
+        assert [e["title"] for e in day_of] == ["Halloween"]
+        assert day_of[0]["start"] == datetime(2026, 10, 31).astimezone()
+
+    def test_recurring_all_day_event_on_its_local_date(self, test_db, chicago_tz):
+        """A yearly all-day birthday lands on its date each year."""
+        anchor = datetime(2025, 10, 27, tzinfo=timezone.utc)
+        yearly = {
+            "type": 4,  # yearly
+            "interval": 1,
+            "daysOfTheWeek": "$null",
+            "firstDayOfTheWeek": 0,
+            "occurrenceCount": 0,
+            "endDate": "$null",
+            "setPositions": "$null",
+            "daysOfTheMonth": "$null",
+            "daysOfTheYear": "$null",
+            "weeksOfTheYear": "$null",
+            "monthsOfTheYear": "$null",
+            "isEndDateAllDay": False,
+            "calendarIdentifier": "$null",
+        }
+        conn = sqlite3.connect(str(test_db))
+        blob = _rich_event_blob(
+            title="Birthday", calendar_id="abc123", start=anchor,
+            end=anchor + timedelta(days=1), recurrence_rule=yearly,
+            is_all_day=True,
+        )
+        _insert_rich(
+            conn, rowid=401, cal_id="abc123", blob=blob, start=anchor,
+            recurrence_end=None, recurring=1,
+        )
+        conn.close()
+
+        db = FantasticalDB(str(test_db))
+        try:
+            day_before = db.get_events_in_range(*_local_day(2026, 10, 26))
+            day_of = db.get_events_in_range(*_local_day(2026, 10, 27))
+        finally:
+            db.close()
+
+        assert [e["title"] for e in day_before] == []
+        assert [e["title"] for e in day_of] == ["Birthday"]
+        assert day_of[0]["start"] == datetime(2026, 10, 27).astimezone()

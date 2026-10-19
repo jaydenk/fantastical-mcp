@@ -57,6 +57,31 @@ def nsdate_to_datetime(nsdate: float) -> datetime:
     return datetime.fromtimestamp(nsdate + NSDATE_OFFSET, tz=timezone.utc)
 
 
+# Widest real-world UTC offset (UTC+14 / UTC-12). All-day events are stored
+# as UTC midnight, so a local-day window can miss them by up to this much.
+_ALL_DAY_PAD = timedelta(hours=14)
+
+
+def float_all_day(event: dict) -> dict:
+    """Re-anchor an all-day event's start/end to local midnight.
+
+    Fantastical stores all-day events as midnight UTC on their calendar date.
+    Treating that as an instant shifts the event onto the previous day for
+    anyone west of UTC (e.g. 2026-10-27 00:00Z is 2026-10-26 19:00 CDT).
+    All-day dates are floating, so keep the UTC wall-clock date and attach
+    the system's local timezone instead. Timed events are returned unchanged.
+    """
+    if not event.get("is_all_day"):
+        return event
+    floated = dict(event)
+    for key in ("start", "end"):
+        dt = floated.get(key)
+        if isinstance(dt, datetime):
+            wall = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            floated[key] = wall.astimezone()
+    return floated
+
+
 def find_database_path() -> str:
     """Auto-discover the Fantastical database file.
 
@@ -268,7 +293,11 @@ class FantasticalDB:
                 else None
             )
 
-            is_all_day_ref = resolve_uid(objects, root.get("isAllDay"))
+            # Fantastical stores a UID to a bool, but an inline bool must not
+            # go through resolve_uid: True would be read as index 1 (the root).
+            is_all_day_ref = root.get("isAllDay")
+            if not isinstance(is_all_day_ref, bool):
+                is_all_day_ref = resolve_uid(objects, is_all_day_ref)
             is_all_day = bool(is_all_day_ref) if isinstance(is_all_day_ref, bool) else False
 
             # Attendees: an NS.objects array of UIDs pointing to attendee dicts.
@@ -397,9 +426,22 @@ class FantasticalDB:
             return None
 
     def _decode_with_fts_fallback(
+        self, rowid: int, blob: bytes, *, floating: bool = True
+    ) -> dict | None:
+        """Try ``decode_event`` first; fall back to FTS + secondary index data.
+
+        With ``floating`` (the default) all-day events are re-anchored to
+        local midnight via :func:`float_all_day`. Recurring masters pass
+        ``floating=False`` so expansion runs on the raw stored instants.
+        """
+        event = self._decode_raw_with_fts_fallback(rowid, blob)
+        if event is not None and floating:
+            return float_all_day(event)
+        return event
+
+    def _decode_raw_with_fts_fallback(
         self, rowid: int, blob: bytes
     ) -> dict | None:
-        """Try ``decode_event`` first; fall back to FTS + secondary index data."""
         event = self.decode_event(blob, rowid)
         if event is not None:
             return event
@@ -544,8 +586,13 @@ class FantasticalDB:
         queried (the exclusion set is still honoured so callers don't need
         to pre-filter).
         """
-        ns_start = window_start.timestamp() - NSDATE_OFFSET
-        ns_end = window_end.timestamp() - NSDATE_OFFSET
+        # Pad the stored-instant query so all-day events (stored as UTC
+        # midnight) whose local date is in the window are not missed; the
+        # exact window is applied after all-day events are floated below.
+        query_start = window_start - _ALL_DAY_PAD
+        query_end = window_end + _ALL_DAY_PAD
+        ns_start = query_start.timestamp() - NSDATE_OFFSET
+        ns_end = query_end.timestamp() - NSDATE_OFFSET
 
         cal_clause = ""
         cal_params: tuple = ()
@@ -604,12 +651,18 @@ class FantasticalDB:
             cal_id = row["calendarIdentifier"]
             if self._is_excluded(cal_id):
                 continue
-            master = self._decode_with_fts_fallback(row["rowid"], row["data"])
+            master = self._decode_with_fts_fallback(
+                row["rowid"], row["data"], floating=False
+            )
             if master is None or master.get("start") is None:
                 continue
-            for occ in self._expand_master(master, window_start, window_end):
+            for occ in self._expand_master(master, query_start, query_end):
                 results.append(occ)
 
+        results = [
+            e for e in results
+            if e.get("start") is None or window_start <= e["start"] < window_end
+        ]
         results.sort(
             key=lambda e: e.get("start") or datetime.max.replace(tzinfo=timezone.utc)
         )
@@ -753,7 +806,7 @@ class FantasticalDB:
             occ["start"] = occ_start
             occ["end"] = (occ_start + duration) if duration else occ_start
             occ["occurrence_of"] = master["rowid"]
-            results.append(occ)
+            results.append(float_all_day(occ))
         return results
 
     def search_events(self, query: str, limit: int = 20) -> list[dict]:
